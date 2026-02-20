@@ -1,0 +1,8 @@
+python-dotenv
+pyTelegramBotAPI
+groq
+yfinance
+feedparser
+apscheduler
+websocket-client
+requests
