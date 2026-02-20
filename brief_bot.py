@@ -51,14 +51,8 @@ def get_osint_news():
     
     try:
         token_url = "https://acleddata.com/oauth/token"
-        payload = {
-            "username": os.getenv("ACLED_EMAIL"),
-            "password": os.getenv("ACLED_PASSWORD"),
-            "grant_type": "password",
-            "client_id": "acled"
-        }
-        token_resp = requests.post(token_url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"})
-        token = token_resp.json()["access_token"]
+        payload = {"username": os.getenv("ACLED_EMAIL"), "password": os.getenv("ACLED_PASSWORD"), "grant_type": "password", "client_id": "acled"}
+        token = requests.post(token_url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()["access_token"]
         url = f"https://acleddata.com/api/acled/read?_format=json&event_date=yesterday&iso={YOUR_REGIONS}&limit=10"
         data = requests.get(url, headers={"Authorization": f"Bearer {token}"}).json()
         for e in data.get('data', [])[:3]:
@@ -136,8 +130,7 @@ def hyper_ws_listener():
                     if ntl > thresh:
                         with liq_lock:
                             liq_cache.append(trade)
-                            if len(liq_cache) > 100:
-                                liq_cache.pop(0)
+                            if len(liq_cache) > 100: liq_cache.pop(0)
         except: pass
 
     def on_open(ws):
@@ -154,39 +147,48 @@ def hyper_ws_listener():
 
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
-def summarize(full_text):
-    prompt = f"""Output ONLY this exact Markdown. One short line per bullet. Numbers & impact first. No intro, no fluff. Prioritize BIG-PICTURE from your X accounts.
+def summarize(raw_data):
+    prompt = f"""You are a concise daily brief writer. Create a clean, professional 2-5 minute read. Use only short bullets. No fluff, no intro, no conclusions.
 
+Raw data:
+{raw_data}
+
+Format exactly like this:
 🌅 Morning Brief — {datetime.now().strftime('%B %d, %Y')}
 
 📰 OSINT
-{full_text.get('osint', '')}
+• bullet
+• bullet
 
 📬 Newsletters (new only)
-{full_text.get('newsletters', '')}
+• bullet
 
 📈 Markets
-{full_text.get('markets', '')}
+• bullet
 
 ⛽ Commodities & Vol
-{full_text.get('commodities', '')}
+• bullet
 
 💥 Hyperliquid Snapshot
-{full_text.get('hyper', '')}
+• bullet
 
 🗓 Economic Calendar (today)
-{full_text.get('econ', '')}
+• bullet
 
 📊 Sentiment
-{full_text.get('sentiment', '')}"""
+• bullet"""
 
-    chat = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=950
-    )
-    return chat.choices[0].message.content
+    try:
+        chat = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=900
+        )
+        return chat.choices[0].message.content.strip()
+    except:
+        # Fallback if Groq fails
+        return "🌅 Morning Brief — " + datetime.now().strftime('%B %d, %Y') + "\n\n" + raw_data
 
 def send_daily_brief():
     osint = get_osint_news()
@@ -197,17 +199,10 @@ def send_daily_brief():
     econ = get_economic_calendar()
     fg = get_fear_greed()
 
-    full = {
-        "osint": osint,
-        "newsletters": nl,
-        "markets": market,
-        "commodities": comm,
-        "hyper": hyper,
-        "econ": econ,
-        "sentiment": fg
-    }
-    summary = summarize(full)
-    bot.send_message(CHANNEL_ID, summary)
+    raw = f"""OSINT:\n{osint}\n\nNewsletters:\n{nl}\n\nMarkets:\n{market}\n\nCommodities:\n{comm}\n\nHyperliquid:\n{hyper}\n\nEconomic Calendar:\n{econ}\n\nSentiment:\n{fg}"""
+
+    summary = summarize(raw)
+    bot.send_message(CHANNEL_ID, summary)   # NO parse_mode
     save_last_brief_time()
 
 @bot.message_handler(commands=['full', 'news', 'market', 'liqs', 'brief'])
@@ -217,13 +212,12 @@ def handle_command(message):
     if cmd in ["/full", "/brief"]:
         send_daily_brief()
     elif cmd == "/news":
-        summary = summarize({"osint": get_osint_news(), "newsletters": get_newsletters_new_only(), "markets":"", "commodities":"", "hyper":"", "econ":"", "sentiment":""})
-        bot.send_message(CHANNEL_ID, f"📰 On-demand OSINT+Newsletters — {datetime.now().strftime('%H:%M')}\n\n{summary}")
+        bot.send_message(CHANNEL_ID, "📰 On-demand OSINT+Newsletters — " + datetime.now().strftime('%H:%M'))
+        bot.send_message(CHANNEL_ID, get_osint_news() + "\n\n" + get_newsletters_new_only())
     elif cmd == "/market":
-        summary = summarize({"osint":"", "newsletters":"", "markets":get_market_update(), "commodities":get_commodities_vol(), "hyper":"", "econ":"", "sentiment":get_fear_greed()})
-        bot.send_message(CHANNEL_ID, f"📈 On-demand Markets — {datetime.now().strftime('%H:%M')}\n\n{summary}")
+        bot.send_message(CHANNEL_ID, "📈 On-demand Markets — " + datetime.now().strftime('%H:%M') + "\n\n" + get_market_update() + "\n\n" + get_commodities_vol() + "\n\nSentiment: " + get_fear_greed())
     elif cmd == "/liqs":
-        bot.send_message(CHANNEL_ID, f"💥 Hyperliquid Snapshot — {datetime.now().strftime('%H:%M')}\n\n{get_hyperliquid_snapshot()}")
+        bot.send_message(CHANNEL_ID, "💥 Hyperliquid Snapshot — " + datetime.now().strftime('%H:%M') + "\n\n" + get_hyperliquid_snapshot())
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(send_daily_brief, 'cron', hour=7, minute=0)
