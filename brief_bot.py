@@ -11,7 +11,6 @@ bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# === CONFIG ===
 RSS_FEEDS = [
     "https://rsshub.app/twitter/user/zerohedge",
     "https://rsshub.app/twitter/user/unusual_whales",
@@ -50,7 +49,6 @@ def get_osint_news():
         for entry in feed.entries[:3]:
             articles.append(f"• {entry.title[:120]} — {entry.link}")
     
-    # ACLED OAuth (updated)
     try:
         token_url = "https://acleddata.com/oauth/token"
         payload = {
@@ -61,13 +59,11 @@ def get_osint_news():
         }
         token_resp = requests.post(token_url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"})
         token = token_resp.json()["access_token"]
-        
         url = f"https://acleddata.com/api/acled/read?_format=json&event_date=yesterday&iso={YOUR_REGIONS}&limit=10"
         data = requests.get(url, headers={"Authorization": f"Bearer {token}"}).json()
         for e in data.get('data', [])[:3]:
             articles.append(f"• {e['event_type']} in {e['country']}: {e['notes'][:80]}...")
     except: pass
-    
     return "\n".join(articles[:12])
 
 def get_newsletters_new_only():
@@ -159,7 +155,7 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(full_text):
-    prompt = f"""Output ONLY this exact Markdown. One short line per bullet. Numbers & impact first. No intro, no conclusions, no fluff. Prioritize BIG-PICTURE macro trends, geopolitics, market-moving signals from @zerohedge @unusual_whales @MarioNawfal @KobeissiLetter @deltaone @watcherguru @spectatorindex.
+    prompt = f"""Output ONLY this exact Markdown. One short line per bullet. Numbers & impact first. No intro, no fluff. Prioritize BIG-PICTURE from your X accounts.
 
 🌅 Morning Brief — {datetime.now().strftime('%B %d, %Y')}
 
@@ -168,3 +164,71 @@ def summarize(full_text):
 
 📬 Newsletters (new only)
 {full_text.get('newsletters', '')}
+
+📈 Markets
+{full_text.get('markets', '')}
+
+⛽ Commodities & Vol
+{full_text.get('commodities', '')}
+
+💥 Hyperliquid Snapshot
+{full_text.get('hyper', '')}
+
+🗓 Economic Calendar (today)
+{full_text.get('econ', '')}
+
+📊 Sentiment
+{full_text.get('sentiment', '')}"""
+
+    chat = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=950
+    )
+    return chat.choices[0].message.content
+
+def send_daily_brief():
+    osint = get_osint_news()
+    nl = get_newsletters_new_only()
+    market = get_market_update()
+    comm = get_commodities_vol()
+    hyper = get_hyperliquid_snapshot()
+    econ = get_economic_calendar()
+    fg = get_fear_greed()
+
+    full = {
+        "osint": osint,
+        "newsletters": nl,
+        "markets": market,
+        "commodities": comm,
+        "hyper": hyper,
+        "econ": econ,
+        "sentiment": fg
+    }
+    summary = summarize(full)
+    bot.send_message(CHANNEL_ID, summary, parse_mode="Markdown")
+    save_last_brief_time()
+
+@bot.message_handler(commands=['full', 'news', 'market', 'liqs', 'brief'])
+def handle_command(message):
+    if message.chat.type != "private": return
+    cmd = message.text.lower()
+    if cmd in ["/full", "/brief"]:
+        send_daily_brief()
+    elif cmd == "/news":
+        summary = summarize({"osint": get_osint_news(), "newsletters": get_newsletters_new_only(), "markets":"", "commodities":"", "hyper":"", "econ":"", "sentiment":""})
+        bot.send_message(CHANNEL_ID, f"📰 On-demand OSINT+Newsletters — {datetime.now().strftime('%H:%M')}\n\n{summary}")
+    elif cmd == "/market":
+        summary = summarize({"osint":"", "newsletters":"", "markets":get_market_update(), "commodities":get_commodities_vol(), "hyper":"", "econ":"", "sentiment":get_fear_greed()})
+        bot.send_message(CHANNEL_ID, f"📈 On-demand Markets — {datetime.now().strftime('%H:%M')}\n\n{summary}")
+    elif cmd == "/liqs":
+        bot.send_message(CHANNEL_ID, f"💥 Hyperliquid Snapshot — {datetime.now().strftime('%H:%M')}\n\n{get_hyperliquid_snapshot()}")
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(send_daily_brief, 'cron', hour=7, minute=0)
+scheduler.add_job(send_daily_brief, 'cron', hour=19, minute=0)
+scheduler.start()
+
+print("🚀 Coffee Brief bot STARTED — DM me /full to test")
+bot.infinity_polling()
