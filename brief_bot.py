@@ -148,20 +148,21 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""You are a concise daily brief writer. Create a clean, professional 2-5 minute read. Use only short bullets. No fluff, no intro, no conclusions.
+    prompt = f"""Create a clean 2-5 minute professional brief. Always make short bullets even if data is limited. Never say "no new information". Use whatever you have.
 
 Raw data:
 {raw_data}
 
-Format exactly like this:
+Output exactly in this format (always fill every section):
+
 🌅 Morning Brief — {datetime.now().strftime('%B %d, %Y')}
 
 📰 OSINT
-• bullet
-• bullet
+• bullet with key insight
+• bullet with key insight
 
 📬 Newsletters (new only)
-• bullet
+• bullet or "No new today"
 
 📈 Markets
 • bullet
@@ -170,25 +171,24 @@ Format exactly like this:
 • bullet
 
 💥 Hyperliquid Snapshot
-• bullet
+• bullet or "Quiet"
 
 🗓 Economic Calendar (today)
-• bullet
+• bullet or "Quiet day"
 
 📊 Sentiment
 • bullet"""
-
+    
     try:
         chat = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=900
+            temperature=0.4,
+            max_tokens=950
         )
         return chat.choices[0].message.content.strip()
     except:
-        # Fallback if Groq fails
-        return "🌅 Morning Brief — " + datetime.now().strftime('%B %d, %Y') + "\n\n" + raw_data
+        return raw_data  # fallback
 
 def send_daily_brief():
     osint = get_osint_news()
