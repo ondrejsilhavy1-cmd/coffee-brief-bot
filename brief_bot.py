@@ -207,7 +207,7 @@ def send_daily_brief():
         "sentiment": fg
     }
     summary = summarize(full)
-    bot.send_message(CHANNEL_ID, summary, parse_mode="Markdown")
+    bot.send_message(CHANNEL_ID, summary)
     save_last_brief_time()
 
 @bot.message_handler(commands=['full', 'news', 'market', 'liqs', 'brief'])
