@@ -1,4 +1,4 @@
-import os, json, time, threading, feedparser, requests, yfinance as yf, logging
+import os, json, re, time, threading, feedparser, requests, yfinance as yf, logging
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from dotenv import load_dotenv
@@ -136,6 +136,8 @@ threading.Thread(target=hyper_ws_listener, daemon=True).start()
 # Helpers
 
 def tg_send(chat_id, text, parse_mode="Markdown"):
+    if parse_mode == "Markdown":
+        text = sanitize_markdown(text)
     MAX = 4000
     chunks = [text[i:i + MAX] for i in range(0, len(text), MAX)]
     for chunk in chunks:
@@ -293,6 +295,31 @@ def _check_push_accounts():
         except Exception as e:
             log.warning("Push poll failed for @%s: %s", handle, e)
 
+
+def sanitize_markdown(text):
+    # Wrap any bare URLs (not already inside markdown parentheses) as [link](url)
+    result = []
+    i = 0
+    while i < len(text):
+        http_pos = text.find('http', i)
+        if http_pos == -1:
+            result.append(text[i:])
+            break
+        result.append(text[i:http_pos])
+        if http_pos > 0 and text[http_pos - 1] == '(':
+            end_pos = http_pos
+            while end_pos < len(text) and text[end_pos] not in (' ', chr(10), ')'):
+                end_pos += 1
+            result.append(text[http_pos:end_pos])
+            i = end_pos
+        else:
+            end_pos = http_pos
+            while end_pos < len(text) and text[end_pos] not in (' ', chr(10), ')'):
+                end_pos += 1
+            url = text[http_pos:end_pos]
+            result.append('[link](' + url + ')')
+            i = end_pos
+    return ''.join(result)
 
 # Deduplication
 # Removes articles whose titles are too similar to ones already seen.
