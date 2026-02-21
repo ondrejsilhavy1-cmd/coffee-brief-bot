@@ -21,6 +21,16 @@ RSS_FEEDS = [
     "https://rsshub.app/twitter/user/spectatorindex",
     "https://liveuamap.com/rss",
     "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics",
+    "https://rss.beehiiv.com/feeds/qyHKIYCF6I.xml",
+    "https://thedailydegen.substack.com/feed",
+    "https://macronotes.substack.com/feed",
+    "https://delphidigital.substack.com/feed",
+    "https://cryptohayes.medium.com/feed",
+    "https://chamath.substack.com/feed",
+    "https://www.bensbites.co/feed",
+    "https://www.deeplearning.ai/the-batch/feed/",
+    "https://alphasignal.substack.com/feed",
+    "https://tldr.tech/ai/feed"
 ]
 
 LAST_BRIEF_FILE = "last_brief.txt"
@@ -29,7 +39,6 @@ YOUR_REGIONS = "IR,IL,SY,RU,UA"
 LIQ_THRESHOLDS = {"BTC": 200000, "ETH": 200000, "SOL": 100000}
 liq_cache = []
 liq_lock = threading.Lock()
-COINS_TO_WATCH = ["BTC", "ETH", "SOL"]
 
 def get_last_brief_time():
     try:
@@ -46,9 +55,8 @@ def get_osint_news():
     articles = []
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:3]:
-            articles.append(f"• {entry.title[:120]} — {entry.link}")
-    
+        for entry in feed.entries[:4]:
+            articles.append(f"• {entry.title[:140]} — {entry.link}")
     try:
         token_url = "https://acleddata.com/oauth/token"
         payload = {"username": os.getenv("ACLED_EMAIL"), "password": os.getenv("ACLED_PASSWORD"), "grant_type": "password", "client_id": "acled"}
@@ -58,20 +66,21 @@ def get_osint_news():
         for e in data.get('data', [])[:3]:
             articles.append(f"• {e['event_type']} in {e['country']}: {e['notes'][:80]}...")
     except: pass
-    return "\n".join(articles[:12])
+    return "\n".join(articles[:12]) or "• Quiet day in OSINT"
 
 def get_newsletters_new_only():
     last = get_last_brief_time()
-    new_items = []
+    items = []
     for url in RSS_FEEDS:
-        if any(x in url.lower() for x in ["morningbrew", "tldr", "finimize", "thehustle"]):
+        if any(x in url.lower() for x in ["beehiiv", "substack", "medium", "bensbites", "deeplearning", "alphasignal", "tldr"]):
             feed = feedparser.parse(url)
             for entry in feed.entries:
                 if entry.published_parsed:
                     pub = datetime(*entry.published_parsed[:6])
                     if pub > last:
-                        new_items.append(f"• {entry.title} — {entry.link}")
-    return "\n".join(new_items[:6]) or "No new newsletters."
+                        summary = (entry.get('summary') or entry.get('description') or "")[:400]
+                        items.append(f"**{entry.title}**\n{summary}\n🔗 {entry.link}\n")
+    return "\n".join(items[:6]) or "No new newsletters today."
 
 def get_market_update():
     tickers = ["^GSPC", "^IXIC", "^DJI", "NVDA", "TSLA", "AAPL", "BTC-USD", "ETH-USD"]
@@ -101,42 +110,40 @@ def get_economic_calendar():
         r = requests.get(f"https://finnhub.io/api/v1/calendar/economic?from={today}&to={today}&token={os.getenv('FINNHUB_KEY')}").json()
         high = [e for e in r.get("economicCalendar", []) if e.get("impact") in ("high", "medium")]
         return "\n".join([f"• {e['time']} {e['event']} ({e.get('country','')})" for e in high[:6]])
-    except: return "No high-impact events."
+    except: return "Quiet day"
 
 def get_hyperliquid_snapshot():
     with liq_lock:
         if not liq_cache:
             return "Quiet — no big liqs"
         lines = []
-        for l in sorted(liq_cache[-15:], key=lambda x: float(x.get("sz", 0)) * float(x.get("px", 0)), reverse=True):
+        for l in sorted(liq_cache[-20:], key=lambda x: float(x.get("sz", 0)) * float(x.get("px", 0)), reverse=True):
             coin = l.get("coin", "OTHER")
-            ntl = float(l.get("sz", 0)) * float(l.get("px", 0))
+            sz = float(l.get("sz", 0))
+            px = float(l.get("px", 0))
+            ntl = sz * px
             thresh = LIQ_THRESHOLDS.get(coin, 50000)
             if ntl > thresh:
-                lines.append(f"• {coin} ~${ntl:,.0f} notional")
+                side = l.get("side", "").upper()
+                direction = "🔴 LONG" if side in ["SELL", "S"] else "🟢 SHORT"
+                lines.append(f"• {coin} {sz:.4f} @ {px:.2f} ({direction}) ~${ntl:,.0f} notional")
         return "\n".join(lines[:8]) or "Quiet"
 
 def hyper_ws_listener():
     def on_message(ws, message):
         try:
             data = json.loads(message)
-            if isinstance(data, dict) and data.get("channel") == "trades":
-                for trade in data.get("data", []):
-                    coin = trade.get("coin")
-                    sz = float(trade.get("sz", 0))
-                    px = float(trade.get("px", 0))
-                    ntl = sz * px
-                    thresh = LIQ_THRESHOLDS.get(coin, 50000)
-                    if ntl > thresh:
-                        with liq_lock:
-                            liq_cache.append(trade)
-                            if len(liq_cache) > 100: liq_cache.pop(0)
+            if data.get("channel") == "liquidations":
+                for liq in data.get("data", []):
+                    with liq_lock:
+                        liq_cache.append(liq)
+                        if len(liq_cache) > 100:
+                            liq_cache.pop(0)
         except: pass
 
     def on_open(ws):
-        for coin in COINS_TO_WATCH:
-            sub = {"method": "subscribe", "subscription": {"type": "trades", "coin": coin}}
-            ws.send(json.dumps(sub))
+        sub = {"method": "subscribe", "subscription": {"type": "liquidations"}}
+        ws.send(json.dumps(sub))
 
     while True:
         try:
@@ -148,37 +155,39 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""Create a clean 2-5 minute professional brief. Always make short bullets even if data is limited. Never say "no new information". Use whatever you have.
+    prompt = f"""Create a clean, professional 2-5 minute coffee brief. Always use short bullets. Always fill every section.
 
 Raw data:
 {raw_data}
 
-Output exactly in this format (always fill every section):
+Output exactly:
 
 🌅 Morning Brief — {datetime.now().strftime('%B %d, %Y')}
 
 📰 OSINT
-• bullet with key insight
-• bullet with key insight
+• bullet
+• bullet
 
 📬 Newsletters (new only)
-• bullet or "No new today"
+**Title**
+2-3 sentence paragraph
+🔗 link
 
 📈 Markets
-• bullet
+One short sentence overview, then bullet list of prices with 24h % (include S&P500, Nasdaq, Dow, key stocks, BTC, ETH)
 
 ⛽ Commodities & Vol
-• bullet
+• bullets
 
 💥 Hyperliquid Snapshot
-• bullet or "Quiet"
+• bullets
 
 🗓 Economic Calendar (today)
-• bullet or "Quiet day"
+• bullets
 
 📊 Sentiment
 • bullet"""
-    
+
     try:
         chat = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -188,7 +197,7 @@ Output exactly in this format (always fill every section):
         )
         return chat.choices[0].message.content.strip()
     except:
-        return raw_data  # fallback
+        return raw_data
 
 def send_daily_brief():
     osint = get_osint_news()
@@ -199,10 +208,10 @@ def send_daily_brief():
     econ = get_economic_calendar()
     fg = get_fear_greed()
 
-    raw = f"""OSINT:\n{osint}\n\nNewsletters:\n{nl}\n\nMarkets:\n{market}\n\nCommodities:\n{comm}\n\nHyperliquid:\n{hyper}\n\nEconomic Calendar:\n{econ}\n\nSentiment:\n{fg}"""
+    raw = f"""OSINT:\n{osint}\n\nNewsletters:\n{nl}\n\nMarkets:\n{market}\n\nCommodities:\n{comm}\n\nHyperliquid:\n{hyper}\n\nEconomic:\n{econ}\n\nSentiment:\n{fg}"""
 
     summary = summarize(raw)
-    bot.send_message(CHANNEL_ID, summary)   # NO parse_mode
+    bot.send_message(CHANNEL_ID, summary)
     save_last_brief_time()
 
 @bot.message_handler(commands=['full', 'news', 'market', 'liqs', 'brief'])
@@ -212,10 +221,9 @@ def handle_command(message):
     if cmd in ["/full", "/brief"]:
         send_daily_brief()
     elif cmd == "/news":
-        bot.send_message(CHANNEL_ID, "📰 On-demand OSINT+Newsletters — " + datetime.now().strftime('%H:%M'))
-        bot.send_message(CHANNEL_ID, get_osint_news() + "\n\n" + get_newsletters_new_only())
+        bot.send_message(CHANNEL_ID, "📰 On-demand OSINT+Newsletters — " + datetime.now().strftime('%H:%M') + "\n\n" + get_osint_news() + "\n\n" + get_newsletters_new_only())
     elif cmd == "/market":
-        bot.send_message(CHANNEL_ID, "📈 On-demand Markets — " + datetime.now().strftime('%H:%M') + "\n\n" + get_market_update() + "\n\n" + get_commodities_vol() + "\n\nSentiment: " + get_fear_greed())
+        bot.send_message(CHANNEL_ID, "📈 On-demand Markets — " + datetime.now().strftime('%H:%M') + "\n\n" + get_market_update())
     elif cmd == "/liqs":
         bot.send_message(CHANNEL_ID, "💥 Hyperliquid Snapshot — " + datetime.now().strftime('%H:%M') + "\n\n" + get_hyperliquid_snapshot())
 
