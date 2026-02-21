@@ -11,7 +11,8 @@ bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-RSS_FEEDS = [
+# OSINT FEEDS ONLY (no newsletters)
+OSINT_FEEDS = [
     "https://rsshub.app/twitter/user/zerohedge",
     "https://rsshub.app/twitter/user/unusual_whales",
     "https://rsshub.app/twitter/user/MarioNawfal",
@@ -21,6 +22,10 @@ RSS_FEEDS = [
     "https://rsshub.app/twitter/user/spectatorindex",
     "https://liveuamap.com/rss",
     "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics",
+]
+
+# Newsletter feeds only
+NEWSLETTER_FEEDS = [
     "https://rss.beehiiv.com/feeds/qyHKIYCF6I.xml",
     "https://thedailydegen.substack.com/feed",
     "https://macronotes.substack.com/feed",
@@ -53,7 +58,7 @@ def save_last_brief_time():
 
 def get_osint_news():
     articles = []
-    for url in RSS_FEEDS:
+    for url in OSINT_FEEDS:
         feed = feedparser.parse(url)
         for entry in feed.entries[:6]:
             articles.append(f"• {entry.title[:150]} — {entry.link}")
@@ -71,32 +76,39 @@ def get_osint_news():
 def get_newsletters_new_only():
     last = get_last_brief_time()
     items = []
-    for url in RSS_FEEDS:
-        if any(x in url.lower() for x in ["beehiiv", "substack", "medium", "bensbites", "deeplearning", "alphasignal", "tldr"]):
-            feed = feedparser.parse(url)
-            for entry in feed.entries:
-                if entry.published_parsed:
-                    pub = datetime(*entry.published_parsed[:6])
-                    if pub > last:
-                        summary = (entry.get('summary') or entry.get('description') or entry.title)[:280]
-                        items.append(f"**{entry.title}**\n{summary}...\n🔗 {entry.link}\n")
+    for url in NEWSLETTER_FEEDS:
+        feed = feedparser.parse(url)
+        for entry in feed.entries:
+            if entry.published_parsed:
+                pub = datetime(*entry.published_parsed[:6])
+                if pub > last:
+                    summary = (entry.get('summary') or entry.get('description') or entry.title)[:280]
+                    items.append(f"**{entry.title}**\n{summary}...\n🔗 {entry.link}\n")
     return "\n".join(items[:5]) or "No new newsletters today."
 
 def get_market_update():
-    tickers = ["^GSPC", "^IXIC", "^DJI", "NVDA", "TSLA", "AAPL", "BTC-USD", "ETH-USD"]
+    tickers = ["^GSPC", "^IXIC", "^DJI", "NVDA", "TSLA", "AAPL"]
     updates = []
     for t in tickers:
         try:
-            if t in ["BTC-USD", "ETH-USD"]:
-                coin = t.replace("-USD", "").lower()
-                price = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd").json()[coin]["usd"]
-                updates.append(f"{t}: {price:,.0f}")
-            else:
-                data = yf.Ticker(t).history(period="2d")['Close']
-                change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
-                updates.append(f"{t}: {data.iloc[-1]:.2f} ({change:+.1f}%)")
+            data = yf.Ticker(t).history(period="2d")['Close']
+            change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
+            updates.append(f"{t}: {data.iloc[-1]:.2f} ({change:+.1f}%)")
         except:
             updates.append(f"{t}: N/A")
+    
+    # BTC & ETH from Binance (reliable public API)
+    try:
+        btc = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT").json()
+        updates.append(f"BTC: {float(btc['lastPrice']):,.0f} ({float(btc['priceChangePercent']):+.1f}%)")
+    except:
+        updates.append("BTC: N/A")
+    try:
+        eth = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT").json()
+        updates.append(f"ETH: {float(eth['lastPrice']):,.0f} ({float(eth['priceChangePercent']):+.1f}%)")
+    except:
+        updates.append("ETH: N/A")
+    
     return "\n".join(updates)
 
 def get_commodities_vol():
@@ -160,27 +172,26 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""You are a sharp macro operator. Create the exact high-signal brief the user wants. OSINT section must be the longest and most informative. Prioritize X accounts (@zerohedge, @KobeissiLetter, @unusual_whales, @MarioNawfal, @watcherguru, @spectatorindex) over newsletters.
+    prompt = f"""You are a sharp macro operator. OSINT section must ONLY use data from X accounts, Liveuamap, GDELT and ACLED. Never mention or use newsletters in OSINT.
 
 Raw data:
 {raw_data}
 
-Output EXACTLY this structure and nothing else:
+Output EXACTLY this structure:
 
 **Condensed Big-Picture Overview – {datetime.now().strftime('%B %d, %Y')}**
 
 ### OSINT & Twitter Scan
+**OSINT Sources:** @zerohedge, @unusual_whales, @MarioNawfal, @KobeissiLetter, @deltaone, @watcherguru, @spectatorindex, Liveuamap, GDELT, ACLED
+
 **Macro Narrative**
-• bullet with source tag [from @account]
-• bullet with source tag [from @account]
+• bullet with source tag [from @account or Liveuamap/GDELT]
 
 **Geopolitical Signals**
-• bullet with source tag [from @account]
-• bullet with source tag [from @account]
+• bullet with source tag
 
 **Market Stress Signals**
-• bullet with source tag [from @account]
-• bullet with source tag [from @account]
+• bullet with source tag
 
 ### Newsletters (new only)
 **Title**
