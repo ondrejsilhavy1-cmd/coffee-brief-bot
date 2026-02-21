@@ -160,27 +160,27 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""Create a sharp, professional daily brief using the exact structure below. OSINT section must be the longest and most informative.
+    prompt = f"""You are a sharp macro operator. Create the exact high-signal brief the user wants. OSINT section must be the longest and most informative. Prioritize X accounts (@zerohedge, @KobeissiLetter, @unusual_whales, @MarioNawfal, @watcherguru, @spectatorindex) over newsletters.
 
 Raw data:
 {raw_data}
 
-Output EXACTLY:
+Output EXACTLY this structure and nothing else:
 
 **Condensed Big-Picture Overview – {datetime.now().strftime('%B %d, %Y')}**
 
 ### OSINT & Twitter Scan
 **Macro Narrative**
-• bullet with source tag
-• bullet with source tag
+• bullet with source tag [from @account]
+• bullet with source tag [from @account]
 
 **Geopolitical Signals**
-• bullet with source tag
-• bullet with source tag
+• bullet with source tag [from @account]
+• bullet with source tag [from @account]
 
 **Market Stress Signals**
-• bullet with source tag
-• bullet with source tag
+• bullet with source tag [from @account]
+• bullet with source tag [from @account]
 
 ### Newsletters (new only)
 **Title**
@@ -189,7 +189,7 @@ short summary
 
 ### Markets
 One sharp sentence overview.
-• S&P500: price (change) with 🟢 or 🔴
+• S&P500: price (change) 🟢 or 🔴
 • Nasdaq: ...
 • Dow: ...
 • NVDA: ...
@@ -219,8 +219,8 @@ Last updated: {datetime.now().strftime('%H:%M UTC')}"""
         chat = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=1200
+            temperature=0.35,
+            max_tokens=1300
         )
         return chat.choices[0].message.content.strip()
     except:
