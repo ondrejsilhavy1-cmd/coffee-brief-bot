@@ -58,8 +58,8 @@ def get_osint_news():
     for url in OSINT_FEEDS:
         feed = feedparser.parse(url)
         for entry in feed.entries[:8]:
-            articles.append(f"• {entry.title[:160]} — {entry.link}")
-    return "\n".join(articles[:20]) or "• No major updates in the last few hours"
+            articles.append(f"• {entry.title[:160]} [link]({entry.link})")
+    return "\n".join(articles[:20]) or "• No major updates"
 
 def get_newsletters_new_only():
     last = get_last_brief_time()
@@ -71,7 +71,7 @@ def get_newsletters_new_only():
                 pub = datetime(*entry.published_parsed[:6])
                 if pub > last:
                     summary = (entry.get('summary') or entry.get('description') or entry.title)[:280]
-                    items.append(f"**{entry.title}**\n{summary}...\n🔗 {entry.link}\n")
+                    items.append(f"**{entry.title}**\n{summary}...\n🔗 [link]({entry.link})")
     return "\n".join(items[:5]) or "No new newsletters today."
 
 def get_market_update():
@@ -118,7 +118,7 @@ def get_hyperliquid_snapshot():
         if not liq_cache:
             return "Quiet — no big liqs"
         lines = []
-        for l in sorted(liq_cache[-20:], key=lambda x: float(x.get("sz", 0)) * float(x.get("px", 0)), reverse=True):
+        for l in sorted(liq_cache[-30:], key=lambda x: float(x.get("sz", 0)) * float(x.get("px", 0)), reverse=True):
             coin = l.get("coin", "OTHER")
             sz = float(l.get("sz", 0))
             px = float(l.get("px", 0))
@@ -128,7 +128,7 @@ def get_hyperliquid_snapshot():
                 side = l.get("side", "").upper()
                 direction = "🔴 LONG" if side in ["SELL", "S"] else "🟢 SHORT"
                 lines.append(f"• {coin} {sz:.4f} @ {px:.2f} ({direction}) ~${ntl:,.0f} notional")
-        return "\n".join(lines[:8]) or "Quiet"
+        return "\n".join(lines[:10]) or "Quiet"
 
 def hyper_ws_listener():
     def on_message(ws, message):
@@ -166,7 +166,7 @@ Output EXACTLY this structure:
 **Condensed Big-Picture Overview – {datetime.now().strftime('%B %d, %Y')}**
 
 ### OSINT & Twitter Scan
-**OSINT Sources:** rss.app feeds + Liveuamap, GDELT, ACLED, LongWarJournal, The Diplomat, War on the Rocks
+**OSINT Sources:** rss.app feeds + LongWarJournal, The Diplomat, War on the Rocks, GDELT, ACLED
 
 **Macro Narrative**
 • detailed bullet with source tag
@@ -236,11 +236,13 @@ def send_daily_brief():
     bot.send_message(CHANNEL_ID, summary)
     save_last_brief_time()
 
-@bot.message_handler(commands=['full', 'news', 'market', 'liqs', 'brief'])
+@bot.message_handler(commands=['full', 'news', 'market', 'liqs', 'brief', 'macro'])
 def handle_command(message):
     cmd = message.text.lower()
     if cmd in ["/full", "/brief"]:
         send_daily_brief()
+    elif cmd == "/macro":
+        bot.send_message(CHANNEL_ID, "📰 Extended OSINT Overview — " + datetime.now().strftime('%H:%M') + "\n\n" + get_osint_news())
     elif cmd == "/news":
         bot.send_message(CHANNEL_ID, "📰 On-demand OSINT+Newsletters — " + datetime.now().strftime('%H:%M') + "\n\n" + get_osint_news() + "\n\n" + get_newsletters_new_only())
     elif cmd == "/market":
@@ -253,5 +255,5 @@ scheduler.add_job(send_daily_brief, 'cron', hour=7, minute=0)
 scheduler.add_job(send_daily_brief, 'cron', hour=19, minute=0)
 scheduler.start()
 
-print("🚀 Coffee Brief bot STARTED — type /full in the channel")
+print("🚀 Coffee Brief bot STARTED — type /full or /macro in the channel")
 bot.infinity_polling()
