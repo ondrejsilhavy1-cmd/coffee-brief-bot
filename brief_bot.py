@@ -1,5 +1,6 @@
 import os, json, time, threading, feedparser, requests, yfinance as yf, logging
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from dotenv import load_dotenv
 import telebot
 from groq import Groq
@@ -8,24 +9,23 @@ import websocket
 
 load_dotenv()
 
-# Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
-)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
+# Your self-hosted RSSHub base URL on Railway
+RSSHUB_URL = os.getenv("RSSHUB_URL", "https://your-rsshub-url.railway.app")
+
 # Feeds
 
-# Geopolitics / OSINT - pure news RSS only, no newsletters
+# Geopolitics / OSINT - pure news RSS, no newsletters
 OSINT_FEEDS = [
-    "https://rss.app/feeds/RJmKz0o5CtyKOk5M.xml",
-    "https://rss.app/feeds/OAxXVuw3QaGC90A0.xml",
+    RSSHUB_URL + "/twitter/user/zerohedge?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/DeItaone?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/spectatorindex?exclude_rts=1",
     "http://feeds.feedburner.com/LongWarJournal",
     "https://thediplomat.com/feed/",
     "https://warontherocks.com/feed/",
@@ -35,14 +35,16 @@ OSINT_FEEDS = [
     "https://reliefweb.int/rss.xml",
 ]
 
-# Markets / macro - pure news RSS only, no newsletters
+# Markets / macro - pure news RSS, no newsletters
 MARKET_FEEDS = [
+    RSSHUB_URL + "/twitter/user/KobeissiLetter?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/unusual_whales?exclude_rts=1",
     "https://news.google.com/rss/search?q=markets+macro+fed+rates+economy&hl=en-US&gl=US&ceid=US%3Aen",
     "https://news.google.com/rss/search?q=stock+market+S%26P+nasdaq+earnings&hl=en-US&gl=US&ceid=US%3Aen",
     "https://feeds.bloomberg.com/markets/news.rss",
 ]
 
-# AI / tech - pure news RSS only, no newsletters
+# AI / tech - pure news RSS, no newsletters
 TECH_FEEDS = [
     "https://news.google.com/rss/search?q=artificial+intelligence+AI+tech+startups&hl=en-US&gl=US&ceid=US%3Aen",
     "https://techcrunch.com/feed/",
@@ -50,7 +52,7 @@ TECH_FEEDS = [
     "https://venturebeat.com/feed/",
 ]
 
-# Newsletters - only used for the newsletter section, never as a news source
+# Newsletters - only used for newsletter section, never as a news source
 NEWSLETTER_FEEDS = [
     ("The Daily Degen",   "https://thedailydegen.substack.com/feed"),
     ("Macro Notes",       "https://macronotes.substack.com/feed"),
@@ -165,29 +167,62 @@ def save_last_brief_time():
     os.replace(tmp, LAST_BRIEF_FILE)
 
 
+# Deduplication
+# Removes articles whose titles are too similar to ones already seen.
+# Uses a simple ratio threshold so near-duplicate stories from different
+# sources are collapsed into one.
+
+def deduplicate(articles, threshold=0.82):
+    seen_titles = []
+    unique = []
+    for item in articles:
+        title = item.get("title", "")
+        is_dupe = any(
+            SequenceMatcher(None, title.lower(), seen.lower()).ratio() > threshold
+            for seen in seen_titles
+        )
+        if not is_dupe:
+            seen_titles.append(title)
+            unique.append(item)
+    return unique
+
+
 # News fetchers (RSS only - newsletters never included here)
 
-def _fetch_feed_list(feeds, max_per_feed=10, total=30):
-    articles = []
+def _fetch_entries(feeds, max_per_feed=10, total=35):
+    raw = []
     for url in feeds:
         for entry in safe_parse_feed(url, max_entries=max_per_feed):
-            title = entry.get("title", "").strip()[:160]
+            title = entry.get("title", "").strip()
             link = entry.get("link", "")
-            if title:
-                articles.append("- " + title + " [link](" + link + ")")
-    return "\n".join(articles[:total])
+            if title and link:
+                raw.append({"title": title[:160], "link": link})
+    deduped = deduplicate(raw)
+    return deduped[:total]
+
+
+def _format_entries(entries):
+    # Produces clean Markdown: "- title [link](url)"
+    # The URL is embedded behind the word "link" - no raw URLs exposed
+    lines = []
+    for e in entries:
+        lines.append("- " + e["title"] + " [link](" + e["link"] + ")")
+    return "\n".join(lines)
 
 
 def get_osint_news():
-    return _fetch_feed_list(OSINT_FEEDS, max_per_feed=8, total=35) or "- No major updates"
+    entries = _fetch_entries(OSINT_FEEDS, max_per_feed=8, total=35)
+    return _format_entries(entries) or "- No major updates"
 
 
 def get_market_news():
-    return _fetch_feed_list(MARKET_FEEDS, max_per_feed=10, total=20) or "- No market news"
+    entries = _fetch_entries(MARKET_FEEDS, max_per_feed=10, total=20)
+    return _format_entries(entries) or "- No market news"
 
 
 def get_tech_news():
-    return _fetch_feed_list(TECH_FEEDS, max_per_feed=10, total=20) or "- No tech news"
+    entries = _fetch_entries(TECH_FEEDS, max_per_feed=10, total=20)
+    return _format_entries(entries) or "- No tech news"
 
 
 def get_newsletters_raw():
@@ -318,9 +353,8 @@ def get_hyperliquid_snapshot():
 
 
 # Groq summarizer
-# IMPORTANT: Groq only ever receives RSS headline text.
-# All structured data (tickers, commodities, liqs, calendar, sentiment)
-# is assembled in Python and appended AFTER this function returns.
+# Groq only ever receives deduplicated RSS headline text.
+# All structured data is assembled in Python and appended AFTER this returns.
 
 def summarize(raw_data, mode="all"):
     if mode == "geo":
@@ -330,7 +364,7 @@ def summarize(raw_data, mode="all"):
             "Rules:\n"
             "- One distinct topic per bullet\n"
             "- 1-2 sentences max per bullet\n"
-            "- Preserve source links in [link](url) format\n"
+            "- Format links as [link](url) -- never show raw URLs\n"
             "- No market data, no tech news, no newsletter content\n"
             "- Group by region where possible (Europe, Middle East, Asia, Americas)\n\n"
             "Raw headlines:\n" + raw_data[:6000]
@@ -344,7 +378,7 @@ def summarize(raw_data, mode="all"):
             "Rules:\n"
             "- One distinct topic per bullet\n"
             "- 1-2 sentences max per bullet\n"
-            "- Preserve source links in [link](url) format\n"
+            "- Format links as [link](url) -- never show raw URLs\n"
             "- Focus strictly on: rates, central banks, equities, crypto, commodities, economic data\n"
             "- No geopolitics unless directly market-moving, no tech product news, no newsletter content\n\n"
             "Raw headlines:\n" + raw_data[:6000]
@@ -358,7 +392,7 @@ def summarize(raw_data, mode="all"):
             "Rules:\n"
             "- One distinct topic per bullet\n"
             "- 1-2 sentences max per bullet\n"
-            "- Preserve source links in [link](url) format\n"
+            "- Format links as [link](url) -- never show raw URLs\n"
             "- Focus strictly on: AI models, research, startups, big tech, developer tools\n"
             "- No market data, no geopolitics, no newsletter content\n\n"
             "Raw headlines:\n" + raw_data[:6000]
@@ -372,7 +406,7 @@ def summarize(raw_data, mode="all"):
             "Rules:\n"
             "- Only use the RSS headlines provided -- do NOT reference newsletter content\n"
             "- One distinct topic per bullet, 1-2 sentences max\n"
-            "- Preserve source links in [link](url) format where available\n"
+            "- Format ALL links as [link](url) -- never show raw URLs in your output\n"
             "- Strictly separate the three sections -- do not mix topics across them\n"
             "- Group geopolitics by region where possible (Europe, Middle East, Asia, Americas)\n"
             "- Do NOT add sections for newsletters, indicators, commodities, liquidations, or sentiment\n\n"
@@ -409,7 +443,7 @@ def summarize(raw_data, mode="all"):
 def build_and_send_brief(chat_id):
     log.info("Building morning brief for %s", chat_id)
 
-    # Step 1: RSS headlines only -> Groq (newsletters and structured data excluded)
+    # Step 1: fetch and deduplicate RSS headlines for Groq
     osint     = get_osint_news()
     mkt_news  = get_market_news()
     tech_news = get_tech_news()
@@ -428,10 +462,10 @@ def build_and_send_brief(chat_id):
     fg          = get_fear_greed()
     newsletters = get_newsletters_raw()
 
-    # Step 3: Groq summarizes the three news sections only
+    # Step 3: Groq summarizes only the three news sections
     news_summary = summarize(news_raw, mode="all")
 
-    # Step 4: assemble -- structured blocks appended directly by the bot
+    # Step 4: assemble -- structured blocks appended directly by bot
     date_str = datetime.now().strftime("%B %d, %Y %H:%M UTC")
     full_message = (
         "*Morning Brief -- " + date_str + "*\n\n"
