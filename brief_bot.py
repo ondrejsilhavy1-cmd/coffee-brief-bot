@@ -55,7 +55,7 @@ def get_osint_news():
     articles = []
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:5]:
+        for entry in feed.entries[:6]:
             articles.append(f"• {entry.title[:150]} — {entry.link}")
     try:
         token_url = "https://acleddata.com/oauth/token"
@@ -66,7 +66,7 @@ def get_osint_news():
         for e in data.get('data', [])[:3]:
             articles.append(f"• {e['event_type']} in {e['country']}: {e['notes'][:80]}...")
     except: pass
-    return "\n".join(articles[:12]) or "• Quiet day in OSINT"
+    return "\n".join(articles[:15]) or "• Quiet day in OSINT"
 
 def get_newsletters_new_only():
     last = get_last_brief_time()
@@ -160,35 +160,60 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""You are a sharp macro operator giving a private daily brief. Create the exact high-signal style the user loves: Core Theme, finance angle, supporting signals, geopolitics, actionable items.
+    prompt = f"""Create a sharp, professional daily brief using the exact structure below. OSINT section must be the longest and most informative.
 
 Raw data:
 {raw_data}
 
-Output EXACTLY this format:
+Output EXACTLY:
 
 **Condensed Big-Picture Overview – {datetime.now().strftime('%B %d, %Y')}**
 
-Sources scanned: @zerohedge, @unusual_whales, @MarioNawfal, @KobeissiLetter, @deltaone, @watcherguru, @spectatorindex + Liveuamap + GDELT + ACLED.
+### OSINT & Twitter Scan
+**Macro Narrative**
+• bullet with source tag
+• bullet with source tag
 
-### Core Theme: 
-[1-2 sentence dominant narrative + biggest implication]
+**Geopolitical Signals**
+• bullet with source tag
+• bullet with source tag
 
-**Key finance angle** 
-[1-2 bullets with source tag e.g. [from @zerohedge]]
+**Market Stress Signals**
+• bullet with source tag
+• bullet with source tag
 
-**Supporting Market & Credit Signals** 
-[3-5 bullets with source tag]
+### Newsletters (new only)
+**Title**
+short summary
+🔗 link
 
-### Geopolitics & Other Headlines  
-[3-5 bullets with source tag]
+### Markets
+One sharp sentence overview.
+• S&P500: price (change) with 🟢 or 🔴
+• Nasdaq: ...
+• Dow: ...
+• NVDA: ...
+• TSLA: ...
+• AAPL: ...
+• BTC: ...
+• ETH: ...
 
-### Actionable Items (Prioritized for You)  
-1. ...
-2. ...
-3. ...
+### Commodities & Vol
+• Gold: ...
+• Crude Oil: ...
+• Natural Gas: ...
+• VIX: ...
 
-This scan is double-checked across all sources. Need deeper dive? Just reply with the command."""
+### Hyperliquid Liquidations
+• ticker size @ price (🔴 LONG or 🟢 SHORT) ~$notional
+
+### Economic Calendar (today)
+• bullets or Quiet day
+
+### Sentiment
+• Fear & Greed status
+
+Last updated: {datetime.now().strftime('%H:%M UTC')}"""
 
     try:
         chat = client.chat.completions.create(
@@ -214,18 +239,10 @@ def send_daily_brief():
 
     summary = summarize(raw)
     bot.send_message(CHANNEL_ID, summary)
-    
-    # Attach Fear & Greed chart
-    try:
-        bot.send_photo(CHANNEL_ID, "https://alternative.me/crypto/fear-and-greed-index.png", caption="Fear & Greed Index (live)")
-    except:
-        pass
-    
     save_last_brief_time()
 
 @bot.message_handler(commands=['full', 'news', 'market', 'liqs', 'brief'])
 def handle_command(message):
-    # Removed private check → works in channel AND DM
     cmd = message.text.lower()
     if cmd in ["/full", "/brief"]:
         send_daily_brief()
@@ -241,5 +258,5 @@ scheduler.add_job(send_daily_brief, 'cron', hour=7, minute=0)
 scheduler.add_job(send_daily_brief, 'cron', hour=19, minute=0)
 scheduler.start()
 
-print("🚀 Coffee Brief bot STARTED — type /full anywhere in the channel")
+print("🚀 Coffee Brief bot STARTED — type /full in the channel")
 bot.infinity_polling()
