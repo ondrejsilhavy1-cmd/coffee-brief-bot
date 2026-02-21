@@ -17,6 +17,7 @@ OSINT_FEEDS = [
     "http://feeds.feedburner.com/LongWarJournal",
     "https://thediplomat.com/feed/",
     "https://warontherocks.com/feed/",
+    "https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US%3Aen",
     "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=(conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics)",
     "https://www.globalincidentmap.com/rss.xml",
     "https://www.cfr.org/global-conflict-tracker/rss",
@@ -57,9 +58,9 @@ def get_osint_news():
     articles = []
     for url in OSINT_FEEDS:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:8]:
+        for entry in feed.entries[:15]:   # more entries for better 8-hour coverage
             articles.append(f"• {entry.title[:160]} [link]({entry.link})")
-    return "\n".join(articles[:20]) or "• No major updates"
+    return "\n".join(articles[:50]) or "• No major updates"
 
 def get_newsletters_new_only():
     last = get_last_brief_time()
@@ -157,13 +158,13 @@ threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data, mode="all"):
     if mode == "geopolitics":
-        prompt = f"Focus ONLY on geopolitics and conflicts. Use direct links. Raw data: {raw_data}"
+        prompt = f"Focus ONLY on geopolitics and conflicts. Synthesize cohesive bullets from all sources. Raw data: {raw_data}"
     elif mode == "market":
-        prompt = f"Focus ONLY on market movements and macroeconomics. Use direct links. Raw data: {raw_data}"
+        prompt = f"Focus ONLY on market movements and macroeconomics. Synthesize cohesive bullets from all sources. Raw data: {raw_data}"
     elif mode == "tech":
-        prompt = f"Focus ONLY on AI and tech news. Use direct links. Raw data: {raw_data}"
+        prompt = f"Focus ONLY on AI and tech news. Synthesize cohesive bullets from all sources. Raw data: {raw_data}"
     else:
-        prompt = f"""Create a sharp, detailed 3-5 minute coffee brief.
+        prompt = f"""Create a sharp, detailed 3-5 minute coffee brief. Synthesize cohesive summaries from all sources into three sections. No single-source attribution.
 
 Raw data:
 {raw_data}
@@ -173,14 +174,14 @@ Output EXACTLY this structure:
 **Condensed Big-Picture Overview – {datetime.now().strftime('%B %d, %Y')}**
 
 ### OSINT & Twitter Scan
-**Macro Narrative**
-• detailed bullet [link]
+**Geopolitics and Conflicts**
+• cohesive bullet [link]
 
-**Geopolitical Signals**
-• detailed bullet [link]
+**Market and Macroeconomics**
+• cohesive bullet [link]
 
-**Market Stress Signals**
-• detailed bullet [link]
+**AI and Tech**
+• cohesive bullet [link]
 
 ### Newsletters (new only)
 **Title**
@@ -241,7 +242,7 @@ def send_daily_brief():
     bot.send_message(CHANNEL_ID, summary)
     save_last_brief_time()
 
-@bot.message_handler(commands=['full', 'all', 'news', 'market', 'liqs', 'brief', 'geopolitics', 'tech', 'macro'])
+@bot.message_handler(commands=['full', 'all', 'news', 'market', 'liqs', 'brief', 'geopolitics', 'tech'])
 def handle_command(message):
     cmd = message.text.lower()
     if cmd in ["/full", "/all", "/brief"]:
