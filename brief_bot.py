@@ -11,15 +11,10 @@ bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# OSINT ONLY (global)
+# OSINT FEEDS — your two rss.app + global reliable sources
 OSINT_FEEDS = [
-    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/zerohedge",
-    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/unusual_whales",
-    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/MarioNawfal",
-    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/KobeissiLetter",
-    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/deltaone",
-    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/watcherguru",
-    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/spectatorindex",
+    "https://rss.app/feeds/RJmKz0o5CtyKOk5M.xml",
+    "https://rss.app/feeds/OAxXVuw3QaGC90A0.xml",
     "https://liveuamap.com/rss",
     "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics",
 ]
@@ -39,7 +34,7 @@ NEWSLETTER_FEEDS = [
 
 LAST_BRIEF_FILE = "last_brief.txt"
 
-LIQ_THRESHOLDS = {"BTC": 200000, "ETH": 200000, "SOL": 100000, "METALS": 150000}  # OTHERS default 50k
+LIQ_THRESHOLDS = {"BTC": 200000, "ETH": 200000, "SOL": 100000, "METALS": 150000}
 liq_cache = []
 liq_lock = threading.Lock()
 
@@ -64,12 +59,12 @@ def get_osint_news():
         token_url = "https://acleddata.com/oauth/token"
         payload = {"username": os.getenv("ACLED_EMAIL"), "password": os.getenv("ACLED_PASSWORD"), "grant_type": "password", "client_id": "acled"}
         token = requests.post(token_url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()["access_token"]
-        url = f"https://acleddata.com/api/acled/read?_format=json&event_date=yesterday&limit=15"  # global
+        url = f"https://acleddata.com/api/acled/read?_format=json&event_date=yesterday&limit=15"
         data = requests.get(url, headers={"Authorization": f"Bearer {token}"}).json()
         for e in data.get('data', [])[:5]:
             articles.append(f"• {e['event_type']} in {e['country']}: {e['notes'][:80]}...")
     except: pass
-    return "\n".join(articles[:18]) or "• Quiet in watched sources"
+    return "\n".join(articles[:18]) or "• No major updates in the last few hours"
 
 def get_newsletters_new_only():
     last = get_last_brief_time()
@@ -133,7 +128,7 @@ def get_hyperliquid_snapshot():
             sz = float(l.get("sz", 0))
             px = float(l.get("px", 0))
             ntl = sz * px
-            thresh = LIQ_THRESHOLDS.get(coin, 50000) if "METAL" not in coin.upper() else LIQ_THRESHOLDS.get("METALS", 150000)
+            thresh = LIQ_THRESHOLDS.get(coin, 50000) if "METAL" not in coin.upper() else 150000
             if ntl > thresh:
                 side = l.get("side", "").upper()
                 direction = "🔴 LONG" if side in ["SELL", "S"] else "🟢 SHORT"
@@ -166,7 +161,7 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""You are a sharp macro operator. OSINT section must ONLY use data from X accounts, Liveuamap, GDELT and ACLED. Never mention newsletters in OSINT.
+    prompt = f"""You are a sharp macro operator. OSINT section must ONLY use data from the provided RSS feeds (your rss.app Twitter feeds, Liveuamap, GDELT, ACLED). Never mention newsletters in OSINT.
 
 Raw data:
 {raw_data}
@@ -176,10 +171,10 @@ Output EXACTLY this structure:
 **Condensed Big-Picture Overview – {datetime.now().strftime('%B %d, %Y')}**
 
 ### OSINT & Twitter Scan
-**OSINT Sources:** @zerohedge, @unusual_whales, @MarioNawfal, @KobeissiLetter, @deltaone, @watcherguru, @spectatorindex, Liveuamap, GDELT, ACLED
+**OSINT Sources:** rss.app feeds + Liveuamap, GDELT, ACLED
 
 **Macro Narrative**
-• bullet with source tag [from @account or Liveuamap/GDELT]
+• bullet with source tag [from rss.app / Liveuamap / GDELT]
 
 **Geopolitical Signals**
 • bullet with source tag
