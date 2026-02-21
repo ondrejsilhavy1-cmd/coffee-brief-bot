@@ -156,7 +156,7 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""Create a sharp, detailed 3-5 minute coffee brief. OSINT section must be the longest and most informative.
+    prompt = f"""Create a sharp, detailed 3-5 minute coffee brief.
 
 Raw data:
 {raw_data}
