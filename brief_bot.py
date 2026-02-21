@@ -143,7 +143,14 @@ def tg_send(chat_id, text, parse_mode="Markdown"):
             bot.send_message(chat_id, chunk, parse_mode=parse_mode)
             time.sleep(0.3)
         except Exception as e:
-            log.error("Telegram send failed: %s", e)
+            log.error("Telegram send failed (parse_mode=%s): %s", parse_mode, e)
+            if parse_mode:
+                try:
+                    bot.send_message(chat_id, chunk, parse_mode="")
+                    log.info("Retried without parse_mode OK")
+                    time.sleep(0.3)
+                except Exception as e2:
+                    log.error("Telegram send failed (no parse_mode): %s", e2)
 
 
 def safe_parse_feed(url, max_entries=12):
