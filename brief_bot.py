@@ -215,7 +215,7 @@ Last updated: {datetime.now().strftime('%H:%M UTC')}"""
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.35,
-            max_tokens=1600
+            max_tokens=900
         )
         return chat.choices[0].message.content.strip()
     except:
