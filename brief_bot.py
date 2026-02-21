@@ -11,7 +11,7 @@ bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# OSINT FEEDS ONLY (no newsletters)
+# OSINT ONLY (global)
 OSINT_FEEDS = [
     "https://rsshub.app/twitter/user/zerohedge",
     "https://rsshub.app/twitter/user/unusual_whales",
@@ -24,7 +24,6 @@ OSINT_FEEDS = [
     "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics",
 ]
 
-# Newsletter feeds only
 NEWSLETTER_FEEDS = [
     "https://rss.beehiiv.com/feeds/qyHKIYCF6I.xml",
     "https://thedailydegen.substack.com/feed",
@@ -39,9 +38,8 @@ NEWSLETTER_FEEDS = [
 ]
 
 LAST_BRIEF_FILE = "last_brief.txt"
-YOUR_REGIONS = "IR,IL,SY,RU,UA"
 
-LIQ_THRESHOLDS = {"BTC": 200000, "ETH": 200000, "SOL": 100000}
+LIQ_THRESHOLDS = {"BTC": 200000, "ETH": 200000, "SOL": 100000, "METALS": 150000}  # OTHERS default 50k
 liq_cache = []
 liq_lock = threading.Lock()
 
@@ -66,12 +64,12 @@ def get_osint_news():
         token_url = "https://acleddata.com/oauth/token"
         payload = {"username": os.getenv("ACLED_EMAIL"), "password": os.getenv("ACLED_PASSWORD"), "grant_type": "password", "client_id": "acled"}
         token = requests.post(token_url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()["access_token"]
-        url = f"https://acleddata.com/api/acled/read?_format=json&event_date=yesterday&iso={YOUR_REGIONS}&limit=10"
+        url = f"https://acleddata.com/api/acled/read?_format=json&event_date=yesterday&limit=15"  # global
         data = requests.get(url, headers={"Authorization": f"Bearer {token}"}).json()
-        for e in data.get('data', [])[:3]:
+        for e in data.get('data', [])[:5]:
             articles.append(f"• {e['event_type']} in {e['country']}: {e['notes'][:80]}...")
     except: pass
-    return "\n".join(articles[:15]) or "• Quiet day in OSINT"
+    return "\n".join(articles[:18]) or "• Quiet in watched sources"
 
 def get_newsletters_new_only():
     last = get_last_brief_time()
@@ -87,7 +85,7 @@ def get_newsletters_new_only():
     return "\n".join(items[:5]) or "No new newsletters today."
 
 def get_market_update():
-    tickers = ["^GSPC", "^IXIC", "^DJI", "NVDA", "TSLA", "AAPL"]
+    tickers = ["^GSPC", "^IXIC", "^DJI", "NVDA", "TSLA", "AAPL", "BTC-USD", "ETH-USD"]
     updates = []
     for t in tickers:
         try:
@@ -96,24 +94,20 @@ def get_market_update():
             updates.append(f"{t}: {data.iloc[-1]:.2f} ({change:+.1f}%)")
         except:
             updates.append(f"{t}: N/A")
-    
-    # BTC & ETH from Binance (reliable public API)
-    try:
-        btc = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT").json()
-        updates.append(f"BTC: {float(btc['lastPrice']):,.0f} ({float(btc['priceChangePercent']):+.1f}%)")
-    except:
-        updates.append("BTC: N/A")
-    try:
-        eth = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT").json()
-        updates.append(f"ETH: {float(eth['lastPrice']):,.0f} ({float(eth['priceChangePercent']):+.1f}%)")
-    except:
-        updates.append("ETH: N/A")
-    
     return "\n".join(updates)
 
 def get_commodities_vol():
     tickers = ["GC=F", "CL=F", "NG=F", "^VIX"]
-    return "\n".join([f"{t}: {yf.Ticker(t).history(period='1d')['Close'].iloc[-1]:.2f}" for t in tickers])
+    updates = []
+    for t in tickers:
+        try:
+            data = yf.Ticker(t).history(period="2d")['Close']
+            change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
+            color = "🟢" if change > 0 else "🔴" if change < 0 else "⚪"
+            updates.append(f"{t}: {data.iloc[-1]:.2f} ({change:+.1f}%) {color}")
+        except:
+            updates.append(f"{t}: N/A")
+    return "\n".join(updates)
 
 def get_fear_greed():
     try:
@@ -139,7 +133,7 @@ def get_hyperliquid_snapshot():
             sz = float(l.get("sz", 0))
             px = float(l.get("px", 0))
             ntl = sz * px
-            thresh = LIQ_THRESHOLDS.get(coin, 50000)
+            thresh = LIQ_THRESHOLDS.get(coin, 50000) if "METAL" not in coin.upper() else LIQ_THRESHOLDS.get("METALS", 150000)
             if ntl > thresh:
                 side = l.get("side", "").upper()
                 direction = "🔴 LONG" if side in ["SELL", "S"] else "🟢 SHORT"
@@ -172,7 +166,7 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""You are a sharp macro operator. OSINT section must ONLY use data from X accounts, Liveuamap, GDELT and ACLED. Never mention or use newsletters in OSINT.
+    prompt = f"""You are a sharp macro operator. OSINT section must ONLY use data from X accounts, Liveuamap, GDELT and ACLED. Never mention newsletters in OSINT.
 
 Raw data:
 {raw_data}
@@ -210,7 +204,7 @@ One sharp sentence overview.
 • ETH: ...
 
 ### Commodities & Vol
-• Gold: ...
+• Gold: price (change) 🟢 or 🔴
 • Crude Oil: ...
 • Natural Gas: ...
 • VIX: ...
