@@ -71,7 +71,7 @@ def get_newsletters_new_only():
                 pub = datetime(*entry.published_parsed[:6])
                 if pub > last:
                     summary = (entry.get('summary') or entry.get('description') or entry.title)[:280]
-                    items.append(f"**{entry.title}**\n{summary}...\n🔗 [link]({entry.link})")
+                    items.append(f"**{entry.title}**\n{summary}...\n🔗 {entry.link}")
     return "\n".join(items[:5]) or "No new newsletters today."
 
 def get_market_update():
@@ -156,7 +156,7 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""Create a sharp, detailed 3-5 minute coffee brief using the exact style the user likes. Always use short, punchy bullets with source tag [from rss.app] or similar. Keep links as [link] only.
+    prompt = f"""Create a sharp, detailed 3-5 minute coffee brief. Use short, punchy bullets. Keep links as [link] only.
 
 Raw data:
 {raw_data}
@@ -169,18 +169,18 @@ Output EXACTLY this structure:
 **OSINT Sources:** rss.app feeds + LongWarJournal, The Diplomat, War on the Rocks, GDELT, ACLED
 
 **Macro Narrative**
-• bullet with source tag [from rss.app]
+• detailed bullet [link]
 
 **Geopolitical Signals**
-• bullet with source tag [from rss.app]
+• detailed bullet [link]
 
 **Market Stress Signals**
-• bullet with source tag [from rss.app]
+• detailed bullet [link]
 
 ### Newsletters (new only)
 **Title**
 short summary
-🔗 link
+🔗 full url
 
 ### Markets
 One sharp sentence overview.
