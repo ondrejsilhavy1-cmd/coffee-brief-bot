@@ -160,9 +160,9 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""You are a sharp macro operator giving a private daily brief. Create the exact style below. Be insightful, concise but detailed, no fluff.
+    prompt = f"""You are a sharp macro operator giving a private daily brief. Create the exact high-signal style the user loves: Core Theme, finance angle, supporting signals, geopolitics, actionable items.
 
-Raw data from your watched sources:
+Raw data:
 {raw_data}
 
 Output EXACTLY this format:
@@ -175,20 +175,20 @@ Sources scanned: @zerohedge, @unusual_whales, @MarioNawfal, @KobeissiLetter, @de
 [1-2 sentence dominant narrative + biggest implication]
 
 **Key finance angle** 
-[1-2 bullets if relevant]
+[1-2 bullets with source tag e.g. [from @zerohedge]]
 
 **Supporting Market & Credit Signals** 
-[3-5 bullets]
+[3-5 bullets with source tag]
 
 ### Geopolitics & Other Headlines  
-[3-5 bullets]
+[3-5 bullets with source tag]
 
 ### Actionable Items (Prioritized for You)  
 1. ...
 2. ...
 3. ...
 
-This scan is double-checked across all sources. Need deeper dive on any topic? Just reply with the command."""
+This scan is double-checked across all sources. Need deeper dive? Just reply with the command."""
 
     try:
         chat = client.chat.completions.create(
@@ -214,11 +214,18 @@ def send_daily_brief():
 
     summary = summarize(raw)
     bot.send_message(CHANNEL_ID, summary)
+    
+    # Attach Fear & Greed chart
+    try:
+        bot.send_photo(CHANNEL_ID, "https://alternative.me/crypto/fear-and-greed-index.png", caption="Fear & Greed Index (live)")
+    except:
+        pass
+    
     save_last_brief_time()
 
 @bot.message_handler(commands=['full', 'news', 'market', 'liqs', 'brief'])
 def handle_command(message):
-    if message.chat.type != "private": return
+    # Removed private check → works in channel AND DM
     cmd = message.text.lower()
     if cmd in ["/full", "/brief"]:
         send_daily_brief()
@@ -234,5 +241,5 @@ scheduler.add_job(send_daily_brief, 'cron', hour=7, minute=0)
 scheduler.add_job(send_daily_brief, 'cron', hour=19, minute=0)
 scheduler.start()
 
-print("🚀 Coffee Brief bot STARTED — DM me /full to test")
+print("🚀 Coffee Brief bot STARTED — type /full anywhere in the channel")
 bot.infinity_polling()
