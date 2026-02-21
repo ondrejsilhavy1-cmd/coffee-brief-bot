@@ -19,6 +19,11 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 # Your self-hosted RSSHub base URL on Railway
 RSSHUB_URL = os.getenv("RSSHUB_URL", "https://your-rsshub-url.railway.app")
 
+# ACLED credentials (register free at acleddata.com)
+ACLED_EMAIL    = os.getenv("ACLED_EMAIL", "")
+ACLED_PASSWORD = os.getenv("ACLED_PASSWORD", "")
+_acled_session = None   # requests.Session, populated lazily
+
 # Feeds
 
 # Geopolitics / OSINT - pure news RSS, no newsletters
@@ -26,6 +31,8 @@ OSINT_FEEDS = [
     RSSHUB_URL + "/twitter/user/zerohedge?exclude_rts=1",
     RSSHUB_URL + "/twitter/user/DeItaone?exclude_rts=1",
     RSSHUB_URL + "/twitter/user/spectatorindex?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/SITREP_artorias?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/sentdefender?exclude_rts=1",
     "http://feeds.feedburner.com/LongWarJournal",
     "https://thediplomat.com/feed/",
     "https://warontherocks.com/feed/",
@@ -39,6 +46,7 @@ OSINT_FEEDS = [
 MARKET_FEEDS = [
     RSSHUB_URL + "/twitter/user/KobeissiLetter?exclude_rts=1",
     RSSHUB_URL + "/twitter/user/unusual_whales?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/TheBlock__?exclude_rts=1",
     "https://news.google.com/rss/search?q=markets+macro+fed+rates+economy&hl=en-US&gl=US&ceid=US%3Aen",
     "https://news.google.com/rss/search?q=stock+market+S%26P+nasdaq+earnings&hl=en-US&gl=US&ceid=US%3Aen",
     "https://feeds.bloomberg.com/markets/news.rss",
@@ -66,6 +74,13 @@ NEWSLETTER_FEEDS = [
 ]
 
 LAST_BRIEF_FILE = "last_brief.txt"
+
+# Push-notification accounts -- polled every 10 min, alert sent immediately
+PUSH_ACCOUNTS = [
+    ("SITREP_artorias", "geo"),
+]
+# Tracks the most-recent tweet ID seen per account so we don't re-alert
+_push_seen = {}   # { "SITREP_artorias": set_of_ids, ... }
 
 # Hyperliquid liquidations
 LIQ_THRESHOLDS = {"BTC": 200000, "ETH": 200000, "SOL": 100000}
@@ -167,6 +182,111 @@ def save_last_brief_time():
     os.replace(tmp, LAST_BRIEF_FILE)
 
 
+# ACLED integration
+
+def _acled_login():
+    """Authenticate with ACLED and return a logged-in session, or None on failure."""
+    global _acled_session
+    if not ACLED_EMAIL or not ACLED_PASSWORD:
+        return None
+    try:
+        s = requests.Session()
+        resp = s.post(
+            "https://acleddata.com/user/login?_format=json",
+            json={"name": ACLED_EMAIL, "pass": ACLED_PASSWORD},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            _acled_session = s
+            log.info("ACLED login OK")
+            return s
+        else:
+            log.warning("ACLED login failed: %s", resp.status_code)
+            return None
+    except Exception as e:
+        log.warning("ACLED login error: %s", e)
+        return None
+
+
+def get_acled_news():
+    """Fetch last 24h high-severity conflict events from ACLED API."""
+    global _acled_session
+    if not ACLED_EMAIL or not ACLED_PASSWORD:
+        return []
+    if _acled_session is None:
+        _acled_login()
+    if _acled_session is None:
+        return []
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        r = _acled_session.get(
+            "https://acleddata.com/api/acled/read",
+            params={
+                "event_date": yesterday + "|" + today,
+                "event_date_where": "BETWEEN",
+                "event_type": "Battles|Explosions/Remote violence|Violence against civilians",
+                "limit": 20,
+                "fields": "event_date|event_type|sub_event_type|actor1|actor2|country|location|notes",
+            },
+            timeout=15
+        )
+        if r.status_code == 401:
+            log.info("ACLED session expired, re-logging in")
+            _acled_login()
+            return []
+        data = r.json().get("data", [])
+        entries = []
+        for ev in data:
+            country  = ev.get("country", "")
+            location = ev.get("location", "")
+            actor1   = ev.get("actor1", "")
+            etype    = ev.get("sub_event_type", ev.get("event_type", ""))
+            notes    = ev.get("notes", "")[:120]
+            title    = "[ACLED] " + etype + " -- " + location + ", " + country
+            if actor1:
+                title += " (" + actor1 + ")"
+            entries.append({"title": title, "link": "https://acleddata.com/data-export-tool/", "notes": notes})
+        return entries
+    except Exception as e:
+        log.warning("ACLED fetch failed: %s", e)
+        return []
+
+
+# SITREP / push-notification poller
+
+def _check_push_accounts():
+    """Poll each push account via RSSHub every 10 min. Send alert for new posts."""
+    for handle, category in PUSH_ACCOUNTS:
+        url = RSSHUB_URL + "/twitter/user/" + handle + "?exclude_rts=1"
+        try:
+            feed = feedparser.parse(url)
+            if not feed.entries:
+                continue
+            seen = _push_seen.setdefault(handle, set())
+            new_entries = []
+            for entry in feed.entries[:5]:
+                entry_id = entry.get("id") or entry.get("link", "")
+                if entry_id and entry_id not in seen:
+                    new_entries.append(entry)
+                    seen.add(entry_id)
+            # On first run just seed seen IDs, don't spam
+            if len(seen) <= len(new_entries):
+                log.info("Push poller: seeded %d IDs for @%s", len(seen), handle)
+                continue
+            for entry in new_entries:
+                title = entry.get("title", "").strip()[:300]
+                link  = entry.get("link", "")
+                emoji = "\U0001f6a8" if category == "geo" else "\U0001f4ca"
+                msg   = emoji + " *@" + handle + "*\n" + title
+                if link:
+                    msg += "\n[link](" + link + ")"
+                tg_send(CHANNEL_ID, msg)
+                log.info("Push alert sent for @%s", handle)
+        except Exception as e:
+            log.warning("Push poll failed for @%s: %s", handle, e)
+
+
 # Deduplication
 # Removes articles whose titles are too similar to ones already seen.
 # Uses a simple ratio threshold so near-duplicate stories from different
@@ -212,7 +332,10 @@ def _format_entries(entries):
 
 def get_osint_news():
     entries = _fetch_entries(OSINT_FEEDS, max_per_feed=8, total=35)
-    return _format_entries(entries) or "- No major updates"
+    # Append ACLED conflict events
+    acled = get_acled_news()
+    entries = entries + acled
+    return _format_entries(entries[:40]) or "- No major updates"
 
 
 def get_market_news():
@@ -567,7 +690,11 @@ def cmd_liqs(message):
 scheduler = BackgroundScheduler(timezone="Europe/Rome")
 scheduler.add_job(send_scheduled_brief, "cron", hour=6, minute=0)
 scheduler.add_job(send_scheduled_brief, "cron", hour=19, minute=0)
+scheduler.add_job(_check_push_accounts, "interval", minutes=10)
 scheduler.start()
+
+# Seed push-seen IDs on startup (so we don't flood on first boot)
+_check_push_accounts()
 
 log.info("Coffee Brief bot STARTED")
 bot.infinity_polling()
