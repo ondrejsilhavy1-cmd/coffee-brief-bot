@@ -58,9 +58,9 @@ def get_osint_news():
     articles = []
     for url in OSINT_FEEDS:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:15]:   # more entries for better 8-hour coverage
+        for entry in feed.entries[:12]:
             articles.append(f"• {entry.title[:160]} [link]({entry.link})")
-    return "\n".join(articles[:50]) or "• No major updates"
+    return "\n".join(articles[:40]) or "• No major updates"
 
 def get_newsletters_new_only():
     last = get_last_brief_time()
@@ -158,13 +158,13 @@ threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data, mode="all"):
     if mode == "geopolitics":
-        prompt = f"Focus ONLY on geopolitics and conflicts. Synthesize cohesive bullets from all sources. Raw data: {raw_data}"
+        prompt = f"Focus ONLY on geopolitics and conflicts. Use short, separate bullets. One topic per bullet. Raw data: {raw_data}"
     elif mode == "market":
-        prompt = f"Focus ONLY on market movements and macroeconomics. Synthesize cohesive bullets from all sources. Raw data: {raw_data}"
+        prompt = f"Focus ONLY on market movements and macroeconomics. Use short, separate bullets. One topic per bullet. Raw data: {raw_data}"
     elif mode == "tech":
-        prompt = f"Focus ONLY on AI and tech news. Synthesize cohesive bullets from all sources. Raw data: {raw_data}"
+        prompt = f"Focus ONLY on AI and tech news. Use short, separate bullets. One topic per bullet. Raw data: {raw_data}"
     else:
-        prompt = f"""Create a sharp, detailed 3-5 minute coffee brief. Synthesize cohesive summaries from all sources into three sections. No single-source attribution.
+        prompt = f"""Create a sharp, detailed 3-5 minute coffee brief. Use short, separate bullets. One topic per bullet. Do not combine unrelated stories.
 
 Raw data:
 {raw_data}
@@ -175,13 +175,13 @@ Output EXACTLY this structure:
 
 ### OSINT & Twitter Scan
 **Geopolitics and Conflicts**
-• cohesive bullet [link]
+• bullet [link]
 
 **Market and Macroeconomics**
-• cohesive bullet [link]
+• bullet [link]
 
 **AI and Tech**
-• cohesive bullet [link]
+• bullet [link]
 
 ### Newsletters (new only)
 **Title**
