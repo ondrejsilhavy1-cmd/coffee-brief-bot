@@ -155,8 +155,15 @@ def hyper_ws_listener():
 
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
-def summarize(raw_data):
-    prompt = f"""Create a sharp, detailed 3-5 minute coffee brief. Use short, punchy bullets. Keep links as [link] only.
+def summarize(raw_data, mode="all"):
+    if mode == "geopolitics":
+        prompt = f"Focus ONLY on geopolitics and conflicts. Use direct links. Raw data: {raw_data}"
+    elif mode == "market":
+        prompt = f"Focus ONLY on market movements and macroeconomics. Use direct links. Raw data: {raw_data}"
+    elif mode == "tech":
+        prompt = f"Focus ONLY on AI and tech news. Use direct links. Raw data: {raw_data}"
+    else:
+        prompt = f"""Create a sharp, detailed 3-5 minute coffee brief.
 
 Raw data:
 {raw_data}
@@ -166,8 +173,6 @@ Output EXACTLY this structure:
 **Condensed Big-Picture Overview – {datetime.now().strftime('%B %d, %Y')}**
 
 ### OSINT & Twitter Scan
-**OSINT Sources:** rss.app feeds + LongWarJournal, The Diplomat, War on the Rocks, GDELT, ACLED
-
 **Macro Narrative**
 • detailed bullet [link]
 
@@ -232,17 +237,24 @@ def send_daily_brief():
 
     raw = f"""OSINT:\n{osint}\n\nNewsletters:\n{nl}\n\nMarkets:\n{market}\n\nCommodities:\n{comm}\n\nHyperliquid:\n{hyper}\n\nEconomic:\n{econ}\n\nSentiment:\n{fg}"""
 
-    summary = summarize(raw)
+    summary = summarize(raw, mode="all")
     bot.send_message(CHANNEL_ID, summary)
     save_last_brief_time()
 
-@bot.message_handler(commands=['full', 'news', 'market', 'liqs', 'brief', 'macro'])
+@bot.message_handler(commands=['full', 'all', 'news', 'market', 'liqs', 'brief', 'geopolitics', 'tech', 'macro'])
 def handle_command(message):
     cmd = message.text.lower()
-    if cmd in ["/full", "/brief"]:
+    if cmd in ["/full", "/all", "/brief"]:
         send_daily_brief()
-    elif cmd == "/macro":
-        bot.send_message(CHANNEL_ID, "📰 Extended OSINT Overview — " + datetime.now().strftime('%H:%M') + "\n\n" + get_osint_news())
+    elif cmd == "/geopolitics":
+        summary = summarize(get_osint_news(), mode="geopolitics")
+        bot.send_message(CHANNEL_ID, "🌍 Extended Geopolitics & Conflicts — " + datetime.now().strftime('%H:%M') + "\n\n" + summary)
+    elif cmd == "/market":
+        summary = summarize(get_osint_news(), mode="market")
+        bot.send_message(CHANNEL_ID, "📈 Extended Market & Macro — " + datetime.now().strftime('%H:%M') + "\n\n" + summary)
+    elif cmd == "/tech":
+        summary = summarize(get_osint_news(), mode="tech")
+        bot.send_message(CHANNEL_ID, "🤖 Extended AI & Tech — " + datetime.now().strftime('%H:%M') + "\n\n" + summary)
     elif cmd == "/news":
         bot.send_message(CHANNEL_ID, "📰 On-demand OSINT+Newsletters — " + datetime.now().strftime('%H:%M') + "\n\n" + get_osint_news() + "\n\n" + get_newsletters_new_only())
     elif cmd == "/market":
@@ -251,9 +263,9 @@ def handle_command(message):
         bot.send_message(CHANNEL_ID, "💥 Hyperliquid Snapshot — " + datetime.now().strftime('%H:%M') + "\n\n" + get_hyperliquid_snapshot())
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(send_daily_brief, 'cron', hour=7, minute=0)
+scheduler.add_job(send_daily_brief, 'cron', hour=5, minute=0)   # 6:00 AM CET
 scheduler.add_job(send_daily_brief, 'cron', hour=19, minute=0)
 scheduler.start()
 
-print("🚀 Coffee Brief bot STARTED — type /full or /macro in the channel")
+print("🚀 Coffee Brief bot STARTED — type /all, /geopolitics, /market, /tech in the channel")
 bot.infinity_polling()
