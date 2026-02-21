@@ -13,13 +13,13 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 # OSINT ONLY (global)
 OSINT_FEEDS = [
-    "https://rsshub.app/twitter/user/zerohedge",
-    "https://rsshub.app/twitter/user/unusual_whales",
-    "https://rsshub.app/twitter/user/MarioNawfal",
-    "https://rsshub.app/twitter/user/KobeissiLetter",
-    "https://rsshub.app/twitter/user/deltaone",
-    "https://rsshub.app/twitter/user/watcherguru",
-    "https://rsshub.app/twitter/user/spectatorindex",
+    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/zerohedge",
+    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/unusual_whales",
+    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/MarioNawfal",
+    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/KobeissiLetter",
+    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/deltaone",
+    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/watcherguru",
+    "https://diygodrsshubchromium-bundled-production-b7d5.up.railway.app/twitter/user/spectatorindex",
     "https://liveuamap.com/rss",
     "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics",
 ]
