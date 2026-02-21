@@ -10,12 +10,9 @@ load_dotenv()
 
 # Logging
 
-logging.basicConfig(
-level=logging.INFO,
-format="%(asctime)s [%(levelname)s] %(message)s",
-handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
-)
-log = logging.getLogger(**name**)
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
 
 bot = telebot.TeleBot(os.getenv(“TELEGRAM_TOKEN”))
 client = Groq(api_key=os.getenv(“GROQ_API_KEY”))
