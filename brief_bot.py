@@ -11,12 +11,16 @@ bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# OSINT FEEDS — your two rss.app + global reliable sources
 OSINT_FEEDS = [
     "https://rss.app/feeds/RJmKz0o5CtyKOk5M.xml",
     "https://rss.app/feeds/OAxXVuw3QaGC90A0.xml",
-    "https://liveuamap.com/rss",
-    "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics",
+    "http://feeds.feedburner.com/LongWarJournal",
+    "https://thediplomat.com/feed/",
+    "https://warontherocks.com/feed/",
+    "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=(conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics)",
+    "https://www.globalincidentmap.com/rss.xml",
+    "https://www.cfr.org/global-conflict-tracker/rss",
+    "https://reliefweb.int/rss.xml",
 ]
 
 NEWSLETTER_FEEDS = [
@@ -53,18 +57,9 @@ def get_osint_news():
     articles = []
     for url in OSINT_FEEDS:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:6]:
-            articles.append(f"• {entry.title[:150]} — {entry.link}")
-    try:
-        token_url = "https://acleddata.com/oauth/token"
-        payload = {"username": os.getenv("ACLED_EMAIL"), "password": os.getenv("ACLED_PASSWORD"), "grant_type": "password", "client_id": "acled"}
-        token = requests.post(token_url, data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"}).json()["access_token"]
-        url = f"https://acleddata.com/api/acled/read?_format=json&event_date=yesterday&limit=15"
-        data = requests.get(url, headers={"Authorization": f"Bearer {token}"}).json()
-        for e in data.get('data', [])[:5]:
-            articles.append(f"• {e['event_type']} in {e['country']}: {e['notes'][:80]}...")
-    except: pass
-    return "\n".join(articles[:18]) or "• No major updates in the last few hours"
+        for entry in feed.entries[:8]:
+            articles.append(f"• {entry.title[:160]} — {entry.link}")
+    return "\n".join(articles[:20]) or "• No major updates in the last few hours"
 
 def get_newsletters_new_only():
     last = get_last_brief_time()
@@ -161,7 +156,7 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""You are a sharp macro operator. OSINT section must ONLY use data from the provided RSS feeds (your rss.app Twitter feeds, Liveuamap, GDELT, ACLED). Never mention newsletters in OSINT.
+    prompt = f"""Create a sharp, detailed 3-5 minute coffee brief. OSINT section must be the longest and most informative.
 
 Raw data:
 {raw_data}
@@ -171,16 +166,16 @@ Output EXACTLY this structure:
 **Condensed Big-Picture Overview – {datetime.now().strftime('%B %d, %Y')}**
 
 ### OSINT & Twitter Scan
-**OSINT Sources:** rss.app feeds + Liveuamap, GDELT, ACLED
+**OSINT Sources:** rss.app feeds + Liveuamap, GDELT, ACLED, LongWarJournal, The Diplomat, War on the Rocks
 
 **Macro Narrative**
-• bullet with source tag [from rss.app / Liveuamap / GDELT]
+• detailed bullet with source tag
 
 **Geopolitical Signals**
-• bullet with source tag
+• detailed bullet with source tag
 
 **Market Stress Signals**
-• bullet with source tag
+• detailed bullet with source tag
 
 ### Newsletters (new only)
 **Title**
@@ -220,7 +215,7 @@ Last updated: {datetime.now().strftime('%H:%M UTC')}"""
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.35,
-            max_tokens=1300
+            max_tokens=1600
         )
         return chat.choices[0].message.content.strip()
     except:
