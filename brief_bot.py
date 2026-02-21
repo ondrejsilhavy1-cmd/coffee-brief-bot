@@ -78,18 +78,23 @@ def get_newsletters_new_only():
                 if entry.published_parsed:
                     pub = datetime(*entry.published_parsed[:6])
                     if pub > last:
-                        summary = (entry.get('summary') or entry.get('description') or "")[:400]
-                        items.append(f"**{entry.title}**\n{summary}\n🔗 {entry.link}\n")
-    return "\n".join(items[:6]) or "No new newsletters today."
+                        summary = (entry.get('summary') or entry.get('description') or entry.title)[:280]
+                        items.append(f"**{entry.title}**\n{summary}...\n🔗 {entry.link}\n")
+    return "\n".join(items[:5]) or "No new newsletters today."
 
 def get_market_update():
     tickers = ["^GSPC", "^IXIC", "^DJI", "NVDA", "TSLA", "AAPL", "BTC-USD", "ETH-USD"]
     updates = []
     for t in tickers:
         try:
-            data = yf.Ticker(t).history(period="2d")['Close']
-            change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
-            updates.append(f"{t}: {data.iloc[-1]:.2f} ({change:+.1f}%)")
+            if t in ["BTC-USD", "ETH-USD"]:
+                coin = t.replace("-USD", "").lower()
+                price = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd").json()[coin]["usd"]
+                updates.append(f"{t}: {price:,.0f} (24h change N/A)")
+            else:
+                data = yf.Ticker(t).history(period="2d")['Close']
+                change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
+                updates.append(f"{t}: {data.iloc[-1]:.2f} ({change:+.1f}%)")
         except:
             updates.append(f"{t}: N/A")
     return "\n".join(updates)
@@ -155,7 +160,7 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""Create a clean, professional 2-5 minute coffee brief. Always use short bullets. Always fill every section.
+    prompt = f"""Create a sharp, professional 2-5 minute coffee brief. Always use short bullets. Always fill every section.
 
 Raw data:
 {raw_data}
@@ -170,11 +175,11 @@ Output exactly:
 
 📬 Newsletters (new only)
 **Title**
-2-3 sentence paragraph
+1-2 sentence summary
 🔗 link
 
 📈 Markets
-One short sentence overview, then bullet list of prices with 24h % (include S&P500, Nasdaq, Dow, key stocks, BTC, ETH)
+One sharp sentence overview, then bullet list of prices with 24h % (always include S&P500, Nasdaq, Dow, NVDA, TSLA, AAPL, BTC, ETH)
 
 ⛽ Commodities & Vol
 • bullets
