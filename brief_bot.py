@@ -55,8 +55,8 @@ def get_osint_news():
     articles = []
     for url in RSS_FEEDS:
         feed = feedparser.parse(url)
-        for entry in feed.entries[:4]:
-            articles.append(f"• {entry.title[:140]} — {entry.link}")
+        for entry in feed.entries[:5]:
+            articles.append(f"• {entry.title[:150]} — {entry.link}")
     try:
         token_url = "https://acleddata.com/oauth/token"
         payload = {"username": os.getenv("ACLED_EMAIL"), "password": os.getenv("ACLED_PASSWORD"), "grant_type": "password", "client_id": "acled"}
@@ -90,7 +90,7 @@ def get_market_update():
             if t in ["BTC-USD", "ETH-USD"]:
                 coin = t.replace("-USD", "").lower()
                 price = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd").json()[coin]["usd"]
-                updates.append(f"{t}: {price:,.0f} (24h change N/A)")
+                updates.append(f"{t}: {price:,.0f}")
             else:
                 data = yf.Ticker(t).history(period="2d")['Close']
                 change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
@@ -160,45 +160,42 @@ def hyper_ws_listener():
 threading.Thread(target=hyper_ws_listener, daemon=True).start()
 
 def summarize(raw_data):
-    prompt = f"""Create a sharp, professional 2-5 minute coffee brief. Always use short bullets. Always fill every section.
+    prompt = f"""You are a sharp macro operator giving a private daily brief. Create the exact style below. Be insightful, concise but detailed, no fluff.
 
-Raw data:
+Raw data from your watched sources:
 {raw_data}
 
-Output exactly:
+Output EXACTLY this format:
 
-🌅 Morning Brief — {datetime.now().strftime('%B %d, %Y')}
+**Condensed Big-Picture Overview – {datetime.now().strftime('%B %d, %Y')}**
 
-📰 OSINT
-• bullet
-• bullet
+Sources scanned: @zerohedge, @unusual_whales, @MarioNawfal, @KobeissiLetter, @deltaone, @watcherguru, @spectatorindex + Liveuamap + GDELT + ACLED.
 
-📬 Newsletters (new only)
-**Title**
-1-2 sentence summary
-🔗 link
+### Core Theme: 
+[1-2 sentence dominant narrative + biggest implication]
 
-📈 Markets
-One sharp sentence overview, then bullet list of prices with 24h % (always include S&P500, Nasdaq, Dow, NVDA, TSLA, AAPL, BTC, ETH)
+**Key finance angle** 
+[1-2 bullets if relevant]
 
-⛽ Commodities & Vol
-• bullets
+**Supporting Market & Credit Signals** 
+[3-5 bullets]
 
-💥 Hyperliquid Snapshot
-• bullets
+### Geopolitics & Other Headlines  
+[3-5 bullets]
 
-🗓 Economic Calendar (today)
-• bullets
+### Actionable Items (Prioritized for You)  
+1. ...
+2. ...
+3. ...
 
-📊 Sentiment
-• bullet"""
+This scan is double-checked across all sources. Need deeper dive on any topic? Just reply with the command."""
 
     try:
         chat = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.4,
-            max_tokens=950
+            max_tokens=1200
         )
         return chat.choices[0].message.content.strip()
     except:
