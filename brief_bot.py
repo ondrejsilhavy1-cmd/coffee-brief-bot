@@ -96,46 +96,55 @@ liq_cache = []
 liq_lock = threading.Lock()
 
 
-def hyper_ws_listener():
-    backoff = 4
-
-    def on_message(ws, message):
-        try:
-            data = json.loads(message)
-            if data.get("channel") == "liquidations":
-                for liq in data.get("data", []):
-                    with liq_lock:
-                        liq_cache.append(liq)
-                        if len(liq_cache) > 200:
-                            liq_cache.pop(0)
-        except Exception as e:
-            log.warning("Hyperliquid WS parse error: %s", e)
-
-    def on_open(ws):
-        ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "liquidations"}}))
-        log.info("Hyperliquid WS connected")
-
-    def on_error(ws, error):
-        log.warning("Hyperliquid WS error: %s", error)
-
+def _poll_hyperliquid_liquidations():
+    """Poll Hyperliquid REST API for recent liquidation trades every 2 minutes."""
+    global _liq_seen_tids
+    # Fetch trades for major coins and filter for liquidations
+    COINS = ["BTC", "ETH", "SOL", "XRP", "HYPE", "WIF", "DOGE", "AVAX", "ARB", "SUI", "BNB", "LINK", "ADA"]
     while True:
         try:
-            ws = websocket.WebSocketApp(
-                "wss://api.hyperliquid.xyz/ws",
-                on_message=on_message,
-                on_open=on_open,
-                on_error=on_error,
-            )
-            ws.run_forever(ping_interval=25)
-            backoff = 4
+            for coin in COINS:
+                resp = requests.post(
+                    "https://api.hyperliquid.xyz/info",
+                    json={"type": "recentTrades", "coin": coin},
+                    timeout=10
+                )
+                if resp.status_code != 200:
+                    continue
+                trades = resp.json()
+                for t in trades:
+                    # Liquidations have "dir" field like "Liquidated Long" or "Liquidated Short"
+                    tid = t.get("tid")
+                    direction = t.get("dir", "")
+                    if "Liquidated" not in direction:
+                        continue
+                    if tid in _liq_seen_tids:
+                        continue
+                    _liq_seen_tids.add(tid)
+                    # Keep set bounded
+                    if len(_liq_seen_tids) > 2000:
+                        _liq_seen_tids = set(list(_liq_seen_tids)[-1000:])
+                    entry = {
+                        "coin": coin,
+                        "px": t.get("px", "0"),
+                        "sz": t.get("sz", "0"),
+                        "side": "SELL" if "Long" in direction else "BUY",
+                        "dir": direction,
+                        "tid": tid,
+                        "user": t.get("users", ["", ""])[0] if t.get("users") else "",
+                    }
+                    with liq_lock:
+                        liq_cache.append(entry)
+                        if len(liq_cache) > 500:
+                            liq_cache.pop(0)
+            time.sleep(120)
         except Exception as e:
-            log.error("Hyperliquid WS crashed: %s", e)
-        log.info("Reconnecting Hyperliquid WS in %ss...", backoff)
-        time.sleep(backoff)
-        backoff = min(backoff * 2, 120)
+            log.error("Hyperliquid liq poll error: %s", e)
+            time.sleep(30)
 
 
-threading.Thread(target=hyper_ws_listener, daemon=True).start()
+threading.Thread(target=_poll_hyperliquid_liquidations, daemon=True).start()
+log.info("Hyperliquid liquidation poller started")
 
 
 # Helpers
@@ -348,14 +357,20 @@ def deduplicate(articles, threshold=0.82):
 
 # News fetchers (RSS only - newsletters never included here)
 
-def _fetch_entries(feeds, max_per_feed=10, total=35):
+def _fetch_entries(feeds, max_per_feed=10, total=35, hours=12):
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     raw = []
     for url in feeds:
         for entry in safe_parse_feed(url, max_entries=max_per_feed):
             title = entry.get("title", "").strip()
             link = entry.get("link", "")
-            if title and link:
-                raw.append({"title": title[:160], "link": link})
+            if not title or not link:
+                continue
+            pub = safe_date(entry)
+            # If feed has no date info, include it anyway (better than missing news)
+            if pub and pub < cutoff:
+                continue
+            raw.append({"title": title[:160], "link": link})
     deduped = deduplicate(raw)
     return deduped[:total]
 
@@ -388,12 +403,12 @@ def get_tech_news():
 
 
 def get_newsletters_raw():
-    last = get_last_brief_time()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=12)
     lines = []
     for name, url in NEWSLETTER_FEEDS:
         for entry in safe_parse_feed(url, max_entries=5):
             pub = safe_date(entry)
-            if pub and pub > last:
+            if pub and pub > cutoff:
                 title = entry.get("title", "Untitled").strip()
                 link = entry.get("link", "")
                 lines.append("- *" + name + "* - [" + title + "](" + link + ")")
@@ -485,33 +500,65 @@ def get_economic_calendar():
         return "- Quiet day"
 
 
-def get_hyperliquid_snapshot():
+def _fmt_usd(n):
+    if n >= 1_000_000:
+        return "${:.2f}m".format(n / 1_000_000)
+    if n >= 1_000:
+        return "${:.2f}k".format(n / 1_000)
+    return "${:.0f}".format(n)
+
+
+def get_hyperliquid_snapshot(hours=12):
+    """Aggregate liquidations over the last `hours` hours into a digest."""
+    cutoff = time.time() - hours * 3600
     with liq_lock:
-        if not liq_cache:
-            return "- Quiet -- no significant liquidations"
-        lines = []
-        for l in sorted(
-            liq_cache[-50:],
-            key=lambda x: float(x.get("sz", 0)) * float(x.get("px", 0)),
-            reverse=True
-        ):
-            coin = l.get("coin", "OTHER")
-            sz = float(l.get("sz", 0))
-            px = float(l.get("px", 0))
-            ntl = sz * px
-            thresh = LIQ_THRESHOLDS.get(
-                coin,
-                METALS_THRESHOLD if "METAL" in coin.upper() else DEFAULT_LIQ_THRESHOLD
-            )
-            if ntl > thresh:
-                side = l.get("side", "").upper()
-                direction = "\U0001f534 LONG liq" if side in ["SELL", "S"] else "\U0001f7e2 SHORT liq"
-                lines.append(
-                    "- " + coin + " " + "{:.4f}".format(sz)
-                    + " @ " + "{:.2f}".format(px)
-                    + " (" + direction + ") ~$" + "{:,.0f}".format(ntl)
-                )
-        return "\n".join(lines[:10]) if lines else "- Quiet -- no significant liquidations"
+        recent = [l for l in liq_cache if l.get("ts", 0) >= cutoff]
+
+    if not recent:
+        return "Quiet -- no significant liquidations in last {}h".format(hours)
+
+    # Aggregate per coin: total long liq USD, total short liq USD, counts
+    from collections import defaultdict
+    agg = defaultdict(lambda: {"long_usd": 0.0, "short_usd": 0.0, "long_n": 0, "short_n": 0, "total_usd": 0.0})
+    total_liq_usd = 0.0
+
+    for l in recent:
+        coin = l.get("coin", "?")
+        sz = float(l.get("sz", 0))
+        px = float(l.get("px", 0))
+        ntl = sz * px
+        is_long = "Long" in l.get("dir", "")
+        if is_long:
+            agg[coin]["long_usd"] += ntl
+            agg[coin]["long_n"] += 1
+        else:
+            agg[coin]["short_usd"] += ntl
+            agg[coin]["short_n"] += 1
+        agg[coin]["total_usd"] += ntl
+        total_liq_usd += ntl
+
+    # Sort by total USD liquidated
+    sorted_coins = sorted(agg.items(), key=lambda x: x[1]["total_usd"], reverse=True)
+
+    lines = []
+    lines.append("*{}h Liquidation Summary* — Total: {}".format(hours, _fmt_usd(total_liq_usd)))
+    lines.append("")
+
+    for coin, data in sorted_coins[:8]:
+        long_part = ""
+        short_part = ""
+        if data["long_usd"] > 0:
+            long_part = "\U0001f534 Longs: {} ({})".format(_fmt_usd(data["long_usd"]), data["long_n"])
+        if data["short_usd"] > 0:
+            short_part = "\U0001f7e2 Shorts: {} ({})".format(_fmt_usd(data["short_usd"]), data["short_n"])
+        both = "  |  ".join(filter(None, [long_part, short_part]))
+        lines.append("*#{}* — {}".format(coin, both))
+
+    total_count = sum(d["long_n"] + d["short_n"] for _, d in agg.items())
+    lines.append("")
+    lines.append("_{} total liquidation events across {} coins_".format(total_count, len(agg)))
+
+    return "\n".join(lines)
 
 
 # Groq summarizer
