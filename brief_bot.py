@@ -32,14 +32,14 @@ OSINT_FEEDS = [
     RSSHUB_URL + "/twitter/user/DeItaone?exclude_rts=1",
     RSSHUB_URL + "/twitter/user/spectatorindex?exclude_rts=1",
     RSSHUB_URL + "/twitter/user/SITREP_artorias?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/ConflictAlarm?exclude_rts=1",
     RSSHUB_URL + "/twitter/user/sentdefender?exclude_rts=1",
     "http://feeds.feedburner.com/LongWarJournal",
     "https://thediplomat.com/feed/",
-    "https://warontherocks.com/feed/",
-    "https://news.google.com/rss/search?q=site%3Areuters.com&hl=en-US&gl=US&ceid=US%3Aen",
+    "https://feeds.reuters.com/reuters/worldNews",
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://rss.dw.com/rdf/rss-en-world",
     "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=(conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics)",
-    "https://www.cfr.org/global-conflict-tracker/rss",
-    "https://reliefweb.int/rss.xml",
 ]
 
 # Markets / macro - pure news RSS, no newsletters
@@ -47,23 +47,27 @@ MARKET_FEEDS = [
     RSSHUB_URL + "/twitter/user/KobeissiLetter?exclude_rts=1",
     RSSHUB_URL + "/twitter/user/unusual_whales?exclude_rts=1",
     RSSHUB_URL + "/twitter/user/TheBlock__?exclude_rts=1",
-    "https://news.google.com/rss/search?q=markets+macro+fed+rates+economy&hl=en-US&gl=US&ceid=US%3Aen",
-    "https://news.google.com/rss/search?q=stock+market+S%26P+nasdaq+earnings&hl=en-US&gl=US&ceid=US%3Aen",
+    RSSHUB_URL + "/twitter/user/MacroAlf?exclude_rts=1",
+    "https://news.google.com/rss/search?q=markets+macro+fed+rates+economy+earnings&hl=en-US&gl=US&ceid=US%3Aen",
     "https://feeds.bloomberg.com/markets/news.rss",
+    "https://www.ft.com/?format=rss",
 ]
 
 # AI / tech - pure news RSS, no newsletters
 TECH_FEEDS = [
+    "https://a16zcrypto.com/feed",
+    "https://simonwillison.net/atom/everything/",
+    "https://www.technologyreview.com/feed/",
     "https://news.google.com/rss/search?q=artificial+intelligence+AI+tech+startups&hl=en-US&gl=US&ceid=US%3Aen",
     "https://techcrunch.com/feed/",
     "https://www.theverge.com/rss/index.xml",
     "https://venturebeat.com/feed/",
+    "https://spectrum.ieee.org/rss",
 ]
 
 # Newsletters - only used for newsletter section, never as a news source
 NEWSLETTER_FEEDS = [
     ("The Daily Degen",   "https://thedailydegen.substack.com/feed"),
-    ("Macro Notes",       "https://macronotes.substack.com/feed"),
     ("Delphi Digital",    "https://delphidigital.substack.com/feed"),
     ("Arthur Hayes",      "https://cryptohayes.medium.com/feed"),
     ("Chamath",           "https://chamath.substack.com/feed"),
@@ -71,6 +75,7 @@ NEWSLETTER_FEEDS = [
     ("The Batch (DL.AI)", "https://www.deeplearning.ai/the-batch/feed/"),
     ("Alpha Signal",      "https://alphasignal.substack.com/feed"),
     ("TLDR AI",           "https://tldr.tech/ai/feed"),
+    ("Bankless",          "https://www.bankless.com/feed"),
 ]
 
 LAST_BRIEF_FILE = "last_brief.txt"
@@ -550,7 +555,8 @@ def summarize(raw_data, mode="all"):
             "- One distinct topic per bullet\n"
             "- 1-2 sentences max per bullet\n"
             "- Format links as [link](url) -- never show raw URLs\n"
-            "- Focus strictly on: AI models, research, startups, big tech, developer tools\n"
+            "- Focus strictly on: AI models, research, startups, big tech, developer tools, crypto tech\n"
+            "- PRIORITY: Any article from a16zcrypto.com must be included -- it is a high-signal source\n"
             "- No market data, no geopolitics, no newsletter content\n\n"
             "Raw headlines:\n" + raw_data[:6000]
         )
