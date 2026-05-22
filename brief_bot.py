@@ -1,1040 +1,787 @@
-"""
-The Cashout — iGaming Daily Brief
-Telegram Channel Bot
-
-Stack: Python, APScheduler, feedparser, Groq (llama-3.3-70b-versatile), telebot, requests, matplotlib
-Deploy: Railway via GitHub
-"""
-
-import os
-import io
-import json
-import logging
-import requests
-import feedparser
+import os, json, re, time, threading, feedparser, requests, yfinance as yf, logging
+from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
+from dotenv import load_dotenv
 import telebot
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import numpy as np
 from groq import Groq
-from apscheduler.schedulers.blocking import BlockingScheduler
-from datetime import datetime, timezone, timedelta
-from collections import defaultdict
+from apscheduler.schedulers.background import BackgroundScheduler
+import websocket
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger("cashout-bot")
+load_dotenv()
 
-# ── Environment variables ─────────────────────────────────────────────────────
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-CHANNEL_ID     = os.environ["CHANNEL_ID"]
-GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
-RSSHUB_URL     = os.environ.get("RSSHUB_URL", "")
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
-# ── Clients ───────────────────────────────────────────────────────────────────
-bot         = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
-groq_client = Groq(api_key=GROQ_API_KEY)
+bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# ── Casino name display map ───────────────────────────────────────────────────
-# Maps raw API slugs → clean display names
-# Add more as you discover them in the data
-CASINO_NAMES = {
-    # Stake — two separate brands
-    "stakeus":         "Stake.us",
-    "stakecom":        "Stake.com",
-    "stakecasino":     "Stake.com",
-    "stake":           "Stake.com",
+# Your self-hosted RSSHub base URL on Railway
+RSSHUB_URL = os.getenv("RSSHUB_URL", "https://your-rsshub-url.railway.app")
 
-    # Major crypto casinos
-    "roobetcom":       "Roobet",
-    "roobet":          "Roobet",
-    "rollbitcom":      "Rollbit",
-    "rollbit":         "Rollbit",
-    "bcgame":          "BC.Game",
-    "bc_game":         "BC.Game",
-    "betfury":         "BetFury",
-    "yologroup":       "Yolo Group",
-    "acebet":          "AceBet",
-    "_500casino":      "500 Casino",
-    "500casino":       "500 Casino",
-    "winr":            "WINR",
-    "crashino":        "Crashino",
-    "duelbitscom":     "Duelbits",
-    "duelbits":        "Duelbits",
-    "thunderpick":     "Thunderpick",
-    "hypedrop":        "HypeDrop",
-    "csgoempire":      "CSGOEmpire",
-    "rakebackgg":      "Rakeback.gg",
-    "gamdomcom":       "Gamdom",
-    "gamdom":          "Gamdom",
-    "fortunejack":     "FortuneJack",
-    "metaspins":       "Metaspins",
-    "bitstarz":        "BitStarz",
-    "cloudbet":        "Cloudbet",
-    "1xbit":           "1xBit",
-    "sportsbetio":     "Sportsbet.io",
-    "sportsbet":       "Sportsbet.io",
-    "primedice":       "Primedice",
-    "winstrike":       "Winstrike",
-    "bspin":           "Bspin",
-    "trustdice":       "TrustDice",
-    "nitrobetting":    "Nitrobetting",
-    "shufflecom":      "Shuffle",
-    "shuffle":         "Shuffle",
-    "luckio":          "Luck.io",
-    "luck":            "Luck.io",
-    "solpot":          "Solpot",
-    "solpump":         "Solpump",
-    "rainbet":         "Rainbet",
-    "duel":            "Duel",
-    "winz":            "Winz.io",
-    "winzio":          "Winz.io",
-    "vave":            "Vave",
-    "mystake":         "MyStake",
-    "jackbit":         "Jackbit",
-    "mirax":           "Mirax",
-    "bets":            "Bets.io",
-    "betsio":          "Bets.io",
-    "coinpoker":       "CoinPoker",
-    "pokerrrr":        "Pokerrrr",
-}
+# ACLED credentials (register free at acleddata.com)
+ACLED_EMAIL    = os.getenv("ACLED_EMAIL", "")
+ACLED_PASSWORD = os.getenv("ACLED_PASSWORD", "")
+_acled_session = None   # requests.Session, populated lazily
 
-# Populated at startup from Tanzanite meta.entity_display — auto-updates when
-# Tanzanite renames slugs. Falls back to CASINO_NAMES, then slug cleanup.
-CASINO_LABELS: dict[str, str] = {}
+# Feeds
 
-
-def clean_name(raw: str) -> str:
-    """Return display name for a casino slug, checking API labels first."""
-    key = raw.lower()
-    return (
-        CASINO_LABELS.get(key)
-        or CASINO_NAMES.get(key)
-        or raw.replace("_", " ").title()
-    )
-
-# ── Chain emoji map ───────────────────────────────────────────────────────────
-CHAIN_EMOJI = {
-    "ARB":      "🔵",   # Arbitrum
-    "ETH":      "⬡",    # Ethereum
-    "BNB":      "🟡",   # BNB Chain
-    "MATIC":    "🟣",   # Polygon
-    "SOL":      "🟢",   # Solana
-    "TRX":      "🔴",   # Tron
-    "AVAX":     "🔺",   # Avalanche
-    "BASE":     "🔷",   # Base
-    "OP":       "🔴",   # Optimism
-}
-
-def chain_tag(chains: list[str]) -> str:
-    """Return emoji string for a list of chains."""
-    tags = [CHAIN_EMOJI.get(c.upper(), f"[{c}]") for c in chains]
-    return " ".join(dict.fromkeys(tags))  # dedup, preserve order
-
-# ── Volume threshold ──────────────────────────────────────────────────────────
-MIN_VOLUME_USD = 50_000   # Minimum daily deposit volume to qualify for rankings
-
-# ── Event channels ────────────────────────────────────────────────────────────
-# Add each event as a dict below. Set active=True when the channel is live,
-# False to disable without deleting. Create the Telegram channel manually,
-# add the bot as admin, then paste the channel ID here.
-#
-# EVENT_CHANNELS = [
-#     {
-#         "id":       "@thecashout_sbcrio",   # or numeric ID
-#         "name":     "SBC Rio 2026",
-#         "date":     "10–12 June 2026",
-#         "location": "Rio de Janeiro, Brazil",
-#         "hashtag":  "#SBCRio2026",
-#         "active":   True,
-#     },
-#     {
-#         "id":       "@thecashout_sigmaeurope",
-#         "name":     "SiGMA Europe 2026",
-#         "date":     "17–20 November 2026",
-#         "location": "Malta",
-#         "hashtag":  "#SiGMAEurope",
-#         "active":   False,   # flip to True when channel is ready
-#     },
-# ]
-
-EVENT_CHANNELS = []  # Populate above and replace this line when ready
-
-# ── RSS feeds ─────────────────────────────────────────────────────────────────
-RSS_FEEDS = [
-    "https://sbcnews.co.uk/feed",
-    "https://igamingbusiness.com/feed",
-    "https://igamingexpert.com/feed",
-    "https://www.yogonet.com/international/rss.xml",
-    "https://gamblingnews.com/feed",
-    "https://gamblinginsider.com/feed",
-    "https://cryptogamblingnews.com/feed",
+# Geopolitics / OSINT - pure news RSS, no newsletters
+OSINT_FEEDS = [
+    RSSHUB_URL + "/twitter/user/zerohedge?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/DeItaone?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/spectatorindex?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/SITREP_artorias?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/ConflictAlarm?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/sentdefender?exclude_rts=1",
+    "http://feeds.feedburner.com/LongWarJournal",
+    "https://thediplomat.com/feed/",
+    "https://feeds.reuters.com/reuters/worldNews",
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://rss.dw.com/rdf/rss-en-world",
+    "https://api.gdeltproject.org/api/v2/doc/doc?mode=artlist&format=rss&timespan=24h&query=(conflict+OR+military+OR+escalation+OR+protest+OR+strike+OR+geopolitics)",
 ]
 
-TWITTER_ACCOUNTS = ["SBCnews", "iGamingBusiness", "GamblingInsider", "tanzanite_xyz"]
-if RSSHUB_URL:
-    for account in TWITTER_ACCOUNTS:
-        RSS_FEEDS.append(f"{RSSHUB_URL.rstrip('/')}/twitter/user/{account}")
+# Markets / macro - pure news RSS, no newsletters
+MARKET_FEEDS = [
+    RSSHUB_URL + "/twitter/user/KobeissiLetter?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/unusual_whales?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/TheBlock__?exclude_rts=1",
+    RSSHUB_URL + "/twitter/user/MacroAlf?exclude_rts=1",
+    "https://news.google.com/rss/search?q=markets+macro+fed+rates+economy+earnings&hl=en-US&gl=US&ceid=US%3Aen",
+    "https://feeds.bloomberg.com/markets/news.rss",
+    "https://www.ft.com/?format=rss",
+]
 
-# ── Tanzanite API ─────────────────────────────────────────────────────────────
-TANZANITE_API          = "https://www.tanzanite.xyz/api/public/casino-analytics/deposit-volume"
-TANZANITE_TRENDING_API = "https://www.tanzanite.xyz/api/public/casino-analytics/trending"
-# deposit-volume  → daily brief (interval day-on-day pct)
-# trending        → weekly recap (pre-calculated week-on-week pct)
-# deposit-distribution → weekly player profile + meta.entity_display labels
+# AI / tech - pure news RSS, no newsletters
+TECH_FEEDS = [
+    "https://a16zcrypto.com/feed",
+    "https://simonwillison.net/atom/everything/",
+    "https://www.technologyreview.com/feed/",
+    "https://news.google.com/rss/search?q=artificial+intelligence+AI+tech+startups&hl=en-US&gl=US&ceid=US%3Aen",
+    "https://techcrunch.com/feed/",
+    "https://www.theverge.com/rss/index.xml",
+    "https://venturebeat.com/feed/",
+    "https://spectrum.ieee.org/rss",
+]
+
+# Newsletters - only used for newsletter section, never as a news source
+NEWSLETTER_FEEDS = [
+    ("The Daily Degen",   "https://thedailydegen.substack.com/feed"),
+    ("Delphi Digital",    "https://delphidigital.substack.com/feed"),
+    ("Arthur Hayes",      "https://cryptohayes.medium.com/feed"),
+    ("Chamath",           "https://chamath.substack.com/feed"),
+    ("Ben's Bites",       "https://www.bensbites.co/feed"),
+    ("The Batch (DL.AI)", "https://www.deeplearning.ai/the-batch/feed/"),
+    ("Alpha Signal",      "https://alphasignal.substack.com/feed"),
+    ("TLDR AI",           "https://tldr.tech/ai/feed"),
+    ("Bankless",          "https://www.bankless.com/feed"),
+]
+
+LAST_BRIEF_FILE = "last_brief.txt"
+
+# Push-notification accounts -- polled every 10 min, alert sent immediately
+PUSH_ACCOUNTS = [
+    ("SITREP_artorias", "geo"),
+]
+# Tracks the most-recent tweet ID seen per account so we don't re-alert
+_push_seen = {}   # { "SITREP_artorias": set_of_ids, ... }
+
+# Hyperliquid liquidations
+LIQ_THRESHOLDS = {"BTC": 200000, "ETH": 200000, "SOL": 100000}
+DEFAULT_LIQ_THRESHOLD = 50000
+METALS_THRESHOLD = 150000
+
+liq_cache = []
+liq_lock = threading.Lock()
 
 
-def fetch_tanzanite() -> dict | None:
-    """
-    Fetches the single deposit-volume endpoint which returns:
-      data["trending"]                                         — pre-ranked list with usd_change_pct
-      data["deposit_volume"]["timeframes"]["monthly"]["sites"] — per-site chain/token breakdown
-    """
+def _poll_hyperliquid_liquidations():
+    """Poll Hyperliquid REST API for recent liquidation trades every 2 minutes."""
+    global _liq_seen_tids
+    # Fetch trades for major coins and filter for liquidations
+    COINS = ["BTC", "ETH", "SOL", "XRP", "HYPE", "WIF", "DOGE", "AVAX", "ARB", "SUI", "BNB", "LINK", "ADA"]
+    while True:
+        try:
+            for coin in COINS:
+                resp = requests.post(
+                    "https://api.hyperliquid.xyz/info",
+                    json={"type": "recentTrades", "coin": coin},
+                    timeout=10
+                )
+                if resp.status_code != 200:
+                    continue
+                trades = resp.json()
+                for t in trades:
+                    # Liquidations have "dir" field like "Liquidated Long" or "Liquidated Short"
+                    tid = t.get("tid")
+                    direction = t.get("dir", "")
+                    if "Liquidated" not in direction:
+                        continue
+                    if tid in _liq_seen_tids:
+                        continue
+                    _liq_seen_tids.add(tid)
+                    # Keep set bounded
+                    if len(_liq_seen_tids) > 2000:
+                        _liq_seen_tids = set(list(_liq_seen_tids)[-1000:])
+                    entry = {
+                        "coin": coin,
+                        "px": t.get("px", "0"),
+                        "sz": t.get("sz", "0"),
+                        "side": "SELL" if "Long" in direction else "BUY",
+                        "dir": direction,
+                        "tid": tid,
+                        "user": t.get("users", ["", ""])[0] if t.get("users") else "",
+                    }
+                    with liq_lock:
+                        liq_cache.append(entry)
+                        if len(liq_cache) > 500:
+                            liq_cache.pop(0)
+            time.sleep(120)
+        except Exception as e:
+            log.error("Hyperliquid liq poll error: %s", e)
+            time.sleep(30)
+
+
+threading.Thread(target=_poll_hyperliquid_liquidations, daemon=True).start()
+log.info("Hyperliquid liquidation poller started")
+
+
+# Helpers
+
+def tg_send(chat_id, text, parse_mode="Markdown"):
+    if parse_mode == "Markdown":
+        text = sanitize_markdown(text)
+    MAX = 4000
+    chunks = [text[i:i + MAX] for i in range(0, len(text), MAX)]
+    for chunk in chunks:
+        try:
+            bot.send_message(chat_id, chunk, parse_mode=parse_mode)
+            time.sleep(0.3)
+        except Exception as e:
+            log.error("Telegram send failed (parse_mode=%s): %s", parse_mode, e)
+            if parse_mode:
+                try:
+                    bot.send_message(chat_id, chunk, parse_mode="")
+                    log.info("Retried without parse_mode OK")
+                    time.sleep(0.3)
+                except Exception as e2:
+                    log.error("Telegram send failed (no parse_mode): %s", e2)
+
+
+def safe_parse_feed(url, max_entries=12):
     try:
-        resp = requests.get(TANZANITE_API, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        n_trending = len(data.get("trending", []))
-        n_sites    = len(data.get("deposit_volume", {}).get("timeframes", {}).get("monthly", {}).get("sites", {}))
-        log.info(f"Tanzanite fetched OK — {n_trending} trending, {n_sites} sites")
-        return data
+        feed = feedparser.parse(url)
+        return feed.entries[:max_entries]
     except Exception as e:
-        log.error(f"Tanzanite API error: {e}")
+        log.warning("Feed failed [%s]: %s", url, e)
+        return []
+
+
+def safe_date(entry):
+    try:
+        if entry.get("published_parsed"):
+            return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+    except Exception:
+        pass
+    return None
+
+
+def get_last_brief_time():
+    try:
+        with open(LAST_BRIEF_FILE, "r") as f:
+            dt = datetime.fromisoformat(f.read().strip())
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+    except Exception:
+        return datetime.now(timezone.utc) - timedelta(days=1)
+
+
+def save_last_brief_time():
+    tmp = LAST_BRIEF_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(datetime.now(timezone.utc).isoformat())
+    os.replace(tmp, LAST_BRIEF_FILE)
+
+
+# ACLED integration
+
+def _acled_login():
+    """Authenticate with ACLED and return a logged-in session, or None on failure."""
+    global _acled_session
+    if not ACLED_EMAIL or not ACLED_PASSWORD:
+        return None
+    try:
+        s = requests.Session()
+        resp = s.post(
+            "https://acleddata.com/user/login?_format=json",
+            json={"name": ACLED_EMAIL, "pass": ACLED_PASSWORD},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            _acled_session = s
+            log.info("ACLED login OK")
+            return s
+        else:
+            log.warning("ACLED login failed: %s", resp.status_code)
+            return None
+    except Exception as e:
+        log.warning("ACLED login error: %s", e)
         return None
 
 
-def fetch_tanzanite_trending() -> list:
-    """
-    Fetches the dedicated trending endpoint — returns week-on-week pct changes.
-    Used exclusively by the Monday weekly recap.
-    Returns the trending list directly, or [] on error.
-    """
+def get_acled_news():
+    """Fetch last 24h high-severity conflict events from ACLED API."""
+    global _acled_session
+    if not ACLED_EMAIL or not ACLED_PASSWORD:
+        return []
+    if _acled_session is None:
+        _acled_login()
+    if _acled_session is None:
+        return []
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     try:
-        resp = requests.get(TANZANITE_TRENDING_API, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        entries = data.get("trending", [])
-        log.info(f"Tanzanite trending fetched OK — {len(entries)} entries")
+        r = _acled_session.get(
+            "https://acleddata.com/api/acled/read",
+            params={
+                "event_date": yesterday + "|" + today,
+                "event_date_where": "BETWEEN",
+                "event_type": "Battles|Explosions/Remote violence|Violence against civilians",
+                "limit": 20,
+                "fields": "event_date|event_type|sub_event_type|actor1|actor2|country|location|notes",
+            },
+            timeout=15
+        )
+        if r.status_code == 401:
+            log.info("ACLED session expired, re-logging in")
+            _acled_login()
+            return []
+        data = r.json().get("data", [])
+        entries = []
+        for ev in data:
+            country  = ev.get("country", "")
+            location = ev.get("location", "")
+            actor1   = ev.get("actor1", "")
+            etype    = ev.get("sub_event_type", ev.get("event_type", ""))
+            notes    = ev.get("notes", "")[:120]
+            title    = "[ACLED] " + etype + " -- " + location + ", " + country
+            if actor1:
+                title += " (" + actor1 + ")"
+            entries.append({"title": title, "link": "https://acleddata.com/data-export-tool/", "notes": notes})
         return entries
     except Exception as e:
-        log.error(f"Tanzanite trending API error: {e}")
+        log.warning("ACLED fetch failed: %s", e)
         return []
 
 
-def fetch_casino_labels() -> None:
-    """
-    Fetches meta.entity_display from deposit-distribution and populates
-    CASINO_LABELS with slug -> label mappings. Called once at startup.
-    Failures are non-fatal — falls back to CASINO_NAMES.
-    """
-    global CASINO_LABELS
-    try:
-        resp = requests.get(TANZANITE_DISTRIBUTION_API, timeout=20)
-        resp.raise_for_status()
-        entity_display = resp.json().get("meta", {}).get("entity_display", {})
-        CASINO_LABELS = {slug: info["label"] for slug, info in entity_display.items() if "label" in info}
-        log.info(f"Casino labels loaded — {len(CASINO_LABELS)} entries from API")
-    except Exception as e:
-        log.warning(f"Could not load casino labels from API: {e} — using hardcoded CASINO_NAMES")
-
-
-def parse_casino_movements(data: dict) -> list:
-    """
-    Computes day-on-day pct change from intervals[0] vs intervals[1] in deposit_volume.
-    This is reliable regardless of whether trending[] is present in the response.
-
-    Returns list of dicts:
-      {name, raw_name, current, previous, pct, chains}
-    sorted by pct DESC, filtered by MIN_VOLUME_USD.
-    """
-    casino_data = defaultdict(lambda: {"current": 0.0, "previous": 0.0, "chains": set()})
-
-    try:
-        sites = data["deposit_volume"]["timeframes"]["monthly"]["sites"]
-    except (KeyError, TypeError):
-        log.error("Tanzanite: could not find deposit_volume.timeframes.monthly.sites")
-        return []
-
-    for site_name, site_info in sites.items():
-        for chain_name, chain_info in site_info.get("chains", {}).items():
-            for token_name, token_info in chain_info.get("tokens", {}).items():
-                intervals = token_info.get("intervals", [])
-                if len(intervals) >= 1:
-                    usd0 = float(intervals[0].get("usd", 0) or 0)
-                    if usd0 < 50_000_000:  # skip corrupted values
-                        casino_data[site_name]["current"] += usd0
-                        casino_data[site_name]["chains"].add(chain_name)
-                if len(intervals) >= 2:
-                    usd1 = float(intervals[1].get("usd", 0) or 0)
-                    if usd1 < 50_000_000:
-                        casino_data[site_name]["previous"] += usd1
-
-    movements = []
-    for raw_name, vols in casino_data.items():
-        curr = vols["current"]
-        prev = vols["previous"]
-
-        if curr < MIN_VOLUME_USD:
-            continue
-
-        if prev > 0:
-            pct = ((curr - prev) / prev) * 100
-        elif curr > 0:
-            pct = 100.0
-        else:
-            continue
-
-        movements.append({
-            "name":     clean_name(raw_name),
-            "raw_name": raw_name,
-            "current":  curr,
-            "previous": prev,
-            "pct":      pct,
-            "chains":   list(vols["chains"]),
-        })
-
-    movements.sort(key=lambda x: x["pct"], reverse=True)
-    return movements
-
-
-def parse_weekly_volumes(data: dict) -> dict[str, float]:
-    """
-    Returns dict of {display_name: 7_day_total_usd} for top casinos.
-    Sums all intervals within the last 7 days.
-    """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-    casino_vols = defaultdict(float)
-
-    try:
-        sites = data["deposit_volume"]["timeframes"]["monthly"]["sites"]
-    except (KeyError, TypeError):
-        return {}
-
-    for casino_name, casino_info in sites.items():
-        for chain_name, chain_info in casino_info.get("chains", {}).items():
-            for token_name, token_info in chain_info.get("tokens", {}).items():
-                for interval in token_info.get("intervals", []):
-                    try:
-                        day = datetime.strptime(interval["day"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                        if day >= cutoff:
-                            usd = float(interval.get("usd", 0) or 0)
-                            # Skip corrupted values
-                            if usd < 50_000_000:
-                                casino_vols[casino_name] += usd
-                    except (ValueError, KeyError):
-                        continue
-
-    # Clean names and filter low volume
-    cleaned = {}
-    for raw, vol in casino_vols.items():
-        if vol >= MIN_VOLUME_USD:
-            cleaned[clean_name(raw)] = cleaned.get(clean_name(raw), 0) + vol
-
-    return cleaned
-
-
-TANZANITE_DISTRIBUTION_API = "https://www.tanzanite.xyz/api/public/casino-analytics/deposit-distribution"
-
-
-def fetch_tanzanite_distribution() -> dict | None:
-    """
-    Fetches the deposit-distribution endpoint.
-    Returns data containing deposit_distribution_buckets with:
-      - buckets: list of bucket definitions (key, label, min_usd, max_usd)
-      - rows: flat list of {timeframe, site, chain, bucket_key,
-              deposit_count, wallet_count, deposit_total_usd, wallet_total_usd}
-    Timeframe is always "weekly" — used for Monday recap only.
-    """
-    try:
-        resp = requests.get(TANZANITE_DISTRIBUTION_API, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
-        n_rows = len(data.get("deposit_distribution_buckets", {}).get("rows", []))
-        log.info(f"Tanzanite distribution fetched OK — {n_rows} rows")
-        return data
-    except Exception as e:
-        log.error(f"Tanzanite distribution API error: {e}")
-        return None
-
-
-def parse_player_profile(dist_data: dict) -> dict | None:
-    """
-    Processes deposit_distribution_buckets rows to find:
-      - whale_casino:   highest % of volume from $100K+ buckets
-      - retail_casino:  highest % of volume from <$1K buckets
-      - balanced_casino: most evenly spread across all buckets (lowest max bucket %)
-
-    Returns dict with keys: whale, whale_pct, retail, retail_pct, balanced, balanced_pct
-    or None if data is unavailable.
-    """
-    try:
-        rows = dist_data["deposit_distribution_buckets"]["rows"]
-    except (KeyError, TypeError):
-        log.error("Distribution: could not find deposit_distribution_buckets.rows")
-        return None
-
-    if not rows:
-        return None
-
-    # Aggregate deposit_total_usd per site per bucket_key
-    site_buckets: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    for row in rows:
-        site      = row.get("site", "")
-        bucket    = row.get("bucket_key", "")
-        usd       = float(row.get("deposit_total_usd", 0) or 0)
-        if site and bucket:
-            site_buckets[site][bucket] += usd
-
-    WHALE_BUCKETS  = {"100000_1000000", "gte_1000000"}
-    RETAIL_BUCKETS = {"lt_100", "100_1000"}
-
-    whale_casino    = None;  whale_pct    = 0.0
-    retail_casino   = None;  retail_pct   = 0.0
-    balanced_casino = None;  balanced_pct = 100.0  # lower = more balanced
-
-    for site, buckets in site_buckets.items():
-        total = sum(buckets.values())
-        if total < MIN_VOLUME_USD:
-            continue
-
-        whale_share  = sum(buckets.get(b, 0) for b in WHALE_BUCKETS)  / total * 100
-        retail_share = sum(buckets.get(b, 0) for b in RETAIL_BUCKETS) / total * 100
-        max_bucket   = max(buckets.values()) / total * 100  # concentration score
-
-        display = clean_name(site) or site
-
-        if whale_share > whale_pct:
-            whale_pct    = whale_share
-            whale_casino = display
-
-        if retail_share > retail_pct:
-            retail_pct    = retail_share
-            retail_casino = display
-
-        if max_bucket < balanced_pct:
-            balanced_pct    = max_bucket
-            balanced_casino = display
-
-    if not whale_casino:
-        return None
-
-    return {
-        "whale":        whale_casino,
-        "whale_pct":    whale_pct,
-        "retail":       retail_casino,
-        "retail_pct":   retail_pct,
-        "balanced":     balanced_casino,
-        "balanced_pct": balanced_pct,
-    }
-
-
-def format_volume(vol: float) -> str:
-    if vol >= 1_000_000:
-        return f"${vol/1_000_000:.2f}M"
-    if vol >= 1_000:
-        return f"${vol/1_000:.1f}K"
-    return f"${vol:.0f}"
-
-
-# ── Chart generator ───────────────────────────────────────────────────────────
-
-def generate_weekly_chart(weekly_vols: dict[str, float]) -> io.BytesIO | None:
-    """Generate a polished dark bar chart of top 10 casinos by 7-day volume."""
-    if not weekly_vols:
-        return None
-
-    sorted_items = sorted(weekly_vols.items(), key=lambda x: x[1], reverse=True)[:10]
-    names  = [item[0] for item in reversed(sorted_items)]
-    values = [item[1] for item in reversed(sorted_items)]
-    n = len(names)
-
-    BG        = "#18181f"
-    ACCENT    = "#00e56b"
-    GOLD      = "#f0c040"
-    TEXT      = "#ffffff"
-    SUBTEXT   = "#55556a"
-    ROW_BG    = "#1e1e28"
-    DIM_GREEN = "#00703a"
-
-    fig, ax = plt.subplots(figsize=(13, 8.5))
-    fig.patch.set_facecolor(BG)
-    ax.set_facecolor(BG)
-
-    max_val   = max(values)
-    bar_h     = 0.44
-    row_h     = 1.0
-    bar_start = max_val * 0.01
-    positions = [i * row_h for i in range(n)]
-
-    for i, (name, val, y) in enumerate(zip(names, values, positions)):
-        is_top = (val == max_val)
-        rank   = n - i
-
-        # Row card
-        row = mpatches.FancyBboxPatch(
-            (-max_val * 0.32, y - row_h * 0.46), max_val * 1.58, row_h * 0.88,
-            boxstyle="round,pad=0.004", facecolor=ROW_BG, edgecolor="none", zorder=1)
-        ax.add_patch(row)
-
-        # Rank badge
-        badge_w = max_val * 0.052
-        badge_h = row_h * 0.52
-        badge_x = -max_val * 0.305
-        badge = mpatches.FancyBboxPatch(
-            (badge_x, y - badge_h / 2), badge_w, badge_h,
-            boxstyle="round,pad=0.003",
-            facecolor=ACCENT if is_top else "#2a2a3a", edgecolor="none", zorder=3)
-        ax.add_patch(badge)
-        ax.text(badge_x + badge_w / 2, y, str(rank),
-                ha="center", va="center",
-                color="#000" if is_top else SUBTEXT,
-                fontsize=9, fontweight="bold", zorder=4)
-
-        # Bar
-        bar = mpatches.FancyBboxPatch(
-            (bar_start, y - bar_h / 2), val, bar_h,
-            boxstyle="round,pad=0.004",
-            facecolor=ACCENT if is_top else DIM_GREEN,
-            edgecolor="none", zorder=2,
-            alpha=0.75 + 0.25 * (val / max_val))
-        ax.add_patch(bar)
-
-        # Casino name
-        ax.text(-max_val * 0.235, y, name,
-                va="center", ha="left",
-                color=TEXT if is_top else "#bbbccc",
-                fontsize=11, fontweight="bold" if is_top else "normal")
-
-        # Volume label
-        ax.text(val + max_val * 0.016, y, format_volume(val),
-                va="center", ha="left",
-                color=GOLD if is_top else "#888899",
-                fontsize=9.5,
-                fontweight="bold" if is_top else "normal",
-                fontfamily="monospace")
-
-    ax.set_yticks([])
-    ax.set_xticks([])
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-    ax.set_xlim(-max_val * 0.33, max_val * 1.28)
-    ax.set_ylim(positions[0] - row_h * 0.6, positions[-1] + row_h * 0.6)
-
-    week_end   = datetime.now(timezone.utc).strftime("%d %b %Y")
-    week_start = (datetime.now(timezone.utc) - timedelta(days=6)).strftime("%d %b")
-
-    fig.text(0.04, 0.975, "Top Onchain Casinos",
-             color=ACCENT, fontsize=18, fontweight="bold", va="top", ha="left")
-    fig.text(0.04, 0.918, f"7-Day Deposit Volume  ·  {week_start} – {week_end}",
-             color=SUBTEXT, fontsize=10, va="top", ha="left")
-    fig.text(0.96, 0.975, "The Cashout",
-             color=TEXT, fontsize=14, fontweight="bold", va="top", ha="right")
-    fig.text(0.96, 0.922, "TG  @The_Cashout",
-             color=ACCENT, fontsize=9.5, va="top", ha="right")
-    fig.text(0.96, 0.018, "Data: Tanzanite Terminal",
-             color=SUBTEXT, fontsize=8, va="bottom", ha="right")
-
-    plt.subplots_adjust(left=0.02, right=0.97, top=0.89, bottom=0.03)
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=160,
-                facecolor=fig.get_facecolor(), bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-
-# ── Groq narrative ────────────────────────────────────────────────────────────
-
-def ai_onchain_narrative(movements: list) -> str:
-    """Ask Groq to write a 2-3 sentence analyst take on today's onchain data."""
-    if not movements:
-        return ""
-
-    top5    = movements[:5]
-    loser   = movements[-1]
-    summary = ", ".join(f"{m['name']} ({m['pct']:+.1f}%)" for m in top5)
-    loser_s = f"{loser['name']} ({loser['pct']:+.1f}%)"
-
-    prompt = (
-        "You are a sharp crypto gambling industry analyst writing for a B2B Telegram channel. "
-        "Based on today's onchain deposit data, write 2-3 punchy sentences interpreting what's happening. "
-        "Be specific — reference the casinos and numbers. No fluff, no disclaimers. "
-        "Write in present tense as if this is breaking intelligence.\n\n"
-        f"Top gainers (last 3-day period): {summary}\n"
-        f"Biggest loser: {loser_s}\n"
-        f"Winner volume: {format_volume(movements[0]['current'])}\n"
-        f"Loser volume: {format_volume(loser['current'])}"
-    )
-
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
-            temperature=0.6,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        log.error(f"Groq narrative error: {e}")
-        return ""
-
-
-# ── News ──────────────────────────────────────────────────────────────────────
-
-SEEN_HEADLINES_FILE = "/app/seen_headlines.json"
-SEEN_HEADLINES_TTL  = 7  # days to remember a headline
-
-
-def load_seen_headlines() -> dict:
-    """Load persisted headline hashes with their date of first appearance."""
-    try:
-        if os.path.exists(SEEN_HEADLINES_FILE):
-            with open(SEEN_HEADLINES_FILE, "r") as f:
-                return json.load(f)
-    except Exception as e:
-        log.warning(f"Could not load seen headlines: {e}")
-    return {}
-
-
-def save_seen_headlines(seen: dict):
-    """Save headline hashes, pruning entries older than TTL."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=SEEN_HEADLINES_TTL)).strftime("%Y-%m-%d")
-    pruned = {k: v for k, v in seen.items() if v >= cutoff}
-    try:
-        with open(SEEN_HEADLINES_FILE, "w") as f:
-            json.dump(pruned, f)
-    except Exception as e:
-        log.warning(f"Could not save seen headlines: {e}")
-
-
-def headline_hash(title: str) -> str:
-    """Short hash of a normalised title for cross-day dedup."""
-    import hashlib
-    normalised = " ".join(title.lower().split())
-    return hashlib.md5(normalised.encode()).hexdigest()[:12]
-
-
-def titles_are_similar(a: str, b: str) -> bool:
-    """Return True if two titles are likely covering the same story."""
-    a_words = set(a.lower().split())
-    b_words = set(b.lower().split())
-    stops = {"a","an","the","in","on","at","to","for","of","and","or","but",
-             "with","as","by","from","is","are","was","were","be","been"}
-    a_words -= stops
-    b_words -= stops
-    if not a_words or not b_words:
-        return False
-    overlap = len(a_words & b_words) / min(len(a_words), len(b_words))
-    return overlap > 0.6
-
-
-def fetch_news_headlines(max_per_feed: int = 3, total_max: int = 10) -> list[dict]:
-    seen_cross_day = load_seen_headlines()
-    today          = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    headlines      = []
-    seen_titles    = []
-    new_seen       = {}
-
-    for url in RSS_FEEDS:
+# SITREP / push-notification poller
+
+def _check_push_accounts():
+    """Poll each push account via RSSHub every 10 min. Send alert for new posts."""
+    for handle, category in PUSH_ACCOUNTS:
+        url = RSSHUB_URL + "/twitter/user/" + handle + "?exclude_rts=1"
         try:
-            feed  = feedparser.parse(url)
-            count = 0
-            for entry in feed.entries:
-                title = entry.get("title", "").strip()
-                link  = entry.get("link",  "").strip()
-                if not title or not link:
-                    continue
-                h = headline_hash(title)
-                # Skip if seen in a previous day's brief
-                if h in seen_cross_day:
-                    continue
-                # Skip near-duplicates within today's batch
-                if any(titles_are_similar(title, seen) for seen in seen_titles):
-                    continue
-                seen_titles.append(title)
-                new_seen[h] = today
-                headlines.append({"title": title, "link": link})
-                count += 1
-                if count >= max_per_feed:
-                    break
+            feed = feedparser.parse(url)
+            if not feed.entries:
+                continue
+            seen = _push_seen.setdefault(handle, set())
+            new_entries = []
+            for entry in feed.entries[:5]:
+                entry_id = entry.get("id") or entry.get("link", "")
+                if entry_id and entry_id not in seen:
+                    new_entries.append(entry)
+                    seen.add(entry_id)
+            # On first run just seed seen IDs, don't spam
+            if len(seen) <= len(new_entries):
+                log.info("Push poller: seeded %d IDs for @%s", len(seen), handle)
+                continue
+            for entry in new_entries:
+                title = entry.get("title", "").strip()[:300]
+                link  = entry.get("link", "")
+                emoji = "\U0001f6a8" if category == "geo" else "\U0001f4ca"
+                msg   = emoji + " *@" + handle + "*\n" + title
+                if link:
+                    msg += "\n[link](" + link + ")"
+                tg_send(CHANNEL_ID, msg)
+                log.info("Push alert sent for @%s", handle)
         except Exception as e:
-            log.warning(f"Feed error ({url}): {e}")
-
-    result = headlines[:total_max]
-
-    # Only persist hashes that made it into the final list
-    final_hashes = {headline_hash(h["title"]) for h in result}
-    for h, d in new_seen.items():
-        if h in final_hashes:
-            seen_cross_day[h] = d
-    save_seen_headlines(seen_cross_day)
-
-    return result
+            log.warning("Push poll failed for @%s: %s", handle, e)
 
 
-# ── Morning greeting basket ───────────────────────────────────────────────────
-DAILY_GREETINGS = [
-    "Good morning — let's see who moved the chips overnight. ☕",
-    "Rise and grind. Onchain never sleeps, but you should. Here's what happened. 📊",
-    "Morning. Markets moved. Casinos shifted. Let's get into it. 🎰",
-    "Another day, another leaderboard. GM. 👋",
-    "Your daily dose of onchain reality. No fluff, just numbers. 📈",
-    "Doors are open, data is fresh. Good morning. ☀️",
-    "While you were sleeping, the chains were busy. Morning briefing below. 🌅",
-    "GM. Here's who won, who lost, and what the industry is talking about today. 🗞️",
-    "Coffee in hand? Good. You'll need it for these numbers. ☕",
-    "Fresh data, fresh week. Let's go. 🚀",
-    "The onchain scorecard is in. Good morning. 🏆",
-    "Morning. Roobet or Rollbit today? The data has opinions. 👀",
-    "Wakey wakey. The leaderboard has spoken. 📣",
-    "No algos, no spin — just raw onchain deposits. GM. ⛓️",
-    "The industry doesn't pause. Neither do we. Good morning. ⚡",
-]
-
-# ── Message builders ──────────────────────────────────────────────────────────
-
-def build_daily_message(data: dict | None) -> str:
-    today = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
-
-    # Rotate greeting by day-of-year — consistent per day, never repeats for 15 days
-    day_index = datetime.now(timezone.utc).timetuple().tm_yday
-    greeting  = DAILY_GREETINGS[day_index % len(DAILY_GREETINGS)]
-
-    lines = [
-        f"<b>🎰 The Cashout — {today}</b>",
-        f"<i>{greeting}</i>\n",
-    ]
-
-    # ── Casino section ────────────────────────────────────────────────────────
-    if data:
-        movements = parse_casino_movements(data)
-
-        if movements:
-            # Winner
-            w = movements[0]
-            lines.append(
-                f"🏆 <b>Winner — Last 3 Days</b>\n"
-                f"<b>{w['name']}</b> — {format_volume(w['current'])} "
-                f"(<b>+{w['pct']:.1f}%</b> vs prev. period)\n"
-            )
-
-            # Loser
-            l = movements[-1]
-            lines.append(
-                f"💀 <b>Loser — Last 3 Days</b>\n"
-                f"<b>{l['name']}</b> — {format_volume(l['current'])} "
-                f"(<b>{l['pct']:+.1f}%</b> vs prev. period)\n"
-            )
-
-            # Top 5
-            medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-            gainers_lines = ["📈 <b>Top 5 Onchain Gainers</b>"]
-            for i, m in enumerate(movements[:5]):
-                gainers_lines.append(
-                    f"{medals[i]} {m['name']} — {format_volume(m['current'])} "
-                    f"(<b>{m['pct']:+.1f}%</b>)"
-                )
-            lines.append("\n".join(gainers_lines) + "\n")
-            narrative = ai_onchain_narrative(movements)
-            if narrative:
-                lines.append(f"💡 <i>{narrative}</i>\n")
+def sanitize_markdown(text):
+    # Wrap any bare URLs (not already inside markdown parentheses) as [link](url)
+    result = []
+    i = 0
+    while i < len(text):
+        http_pos = text.find('http', i)
+        if http_pos == -1:
+            result.append(text[i:])
+            break
+        result.append(text[i:http_pos])
+        if http_pos > 0 and text[http_pos - 1] == '(':
+            end_pos = http_pos
+            while end_pos < len(text) and text[end_pos] not in (' ', chr(10), ')'):
+                end_pos += 1
+            result.append(text[http_pos:end_pos])
+            i = end_pos
         else:
-            lines.append("📊 <i>Onchain casino data unavailable today.</i>\n")
-    else:
-        lines.append("📊 <i>Could not reach Tanzanite Terminal API today.</i>\n")
+            end_pos = http_pos
+            while end_pos < len(text) and text[end_pos] not in (' ', chr(10), ')'):
+                end_pos += 1
+            url = text[http_pos:end_pos]
+            result.append('[link](' + url + ')')
+            i = end_pos
+    return ''.join(result)
 
-    # ── News section ──────────────────────────────────────────────────────────
-    headlines = fetch_news_headlines()
-    news_block = ["📰 <b>Industry News</b>"]
-    for h in headlines:
-        news_block.append(
-            f'• {h["title"]}\n'
-            f'  <a href="{h["link"]}">Read more →</a>'
+# Deduplication
+# Removes articles whose titles are too similar to ones already seen.
+# Uses a simple ratio threshold so near-duplicate stories from different
+# sources are collapsed into one.
+
+def deduplicate(articles, threshold=0.82):
+    seen_titles = []
+    unique = []
+    for item in articles:
+        title = item.get("title", "")
+        is_dupe = any(
+            SequenceMatcher(None, title.lower(), seen.lower()).ratio() > threshold
+            for seen in seen_titles
         )
-    lines.append("\n".join(news_block))
+        if not is_dupe:
+            seen_titles.append(title)
+            unique.append(item)
+    return unique
 
-    # ── Footer ────────────────────────────────────────────────────────────────
-    lines.append(
-        "\n<i>Onchain data: <a href=\"https://terminal.tanzanite.xyz\">Tanzanite Terminal</a> "
-        "| 💬 Drop a take in the comments</i>"
-    )
+
+# News fetchers (RSS only - newsletters never included here)
+
+def _fetch_entries(feeds, max_per_feed=10, total=35, hours=12):
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    raw = []
+    for url in feeds:
+        for entry in safe_parse_feed(url, max_entries=max_per_feed):
+            title = entry.get("title", "").strip()
+            link = entry.get("link", "")
+            if not title or not link:
+                continue
+            pub = safe_date(entry)
+            # If feed has no date info, include it anyway (better than missing news)
+            if pub and pub < cutoff:
+                continue
+            raw.append({"title": title[:160], "link": link})
+    deduped = deduplicate(raw)
+    return deduped[:total]
+
+
+def _format_entries(entries):
+    # Produces clean Markdown: "- title [link](url)"
+    # The URL is embedded behind the word "link" - no raw URLs exposed
+    lines = []
+    for e in entries:
+        lines.append("- " + e["title"] + " [link](" + e["link"] + ")")
+    return "\n".join(lines)
+
+
+def get_osint_news():
+    entries = _fetch_entries(OSINT_FEEDS, max_per_feed=8, total=35)
+    # Append ACLED conflict events
+    acled = get_acled_news()
+    entries = entries + acled
+    return _format_entries(entries[:40]) or "- No major updates"
+
+
+def get_market_news():
+    entries = _fetch_entries(MARKET_FEEDS, max_per_feed=10, total=20)
+    return _format_entries(entries) or "- No market news"
+
+
+def get_tech_news():
+    entries = _fetch_entries(TECH_FEEDS, max_per_feed=10, total=20)
+    return _format_entries(entries) or "- No tech news"
+
+
+def get_newsletters_raw():
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=12)
+    lines = []
+    for name, url in NEWSLETTER_FEEDS:
+        for entry in safe_parse_feed(url, max_entries=5):
+            pub = safe_date(entry)
+            if pub and pub > cutoff:
+                title = entry.get("title", "Untitled").strip()
+                link = entry.get("link", "")
+                lines.append("- *" + name + "* - [" + title + "](" + link + ")")
+    return "\n".join(lines) if lines else "- No new newsletters since last brief."
+
+
+# Market data (fetched directly, never passed through Groq)
+
+def fetch_ticker(symbol):
+    try:
+        data = yf.Ticker(symbol).history(period="2d")["Close"]
+        if len(data) < 2:
+            return symbol, None, None
+        change = ((data.iloc[-1] - data.iloc[-2]) / data.iloc[-2]) * 100
+        return symbol, data.iloc[-1], change
+    except Exception as e:
+        log.warning("yfinance failed [%s]: %s", symbol, e)
+        return symbol, None, None
+
+
+def get_market_update():
+    tickers = {
+        "^GSPC":   "S&P 500",
+        "^IXIC":   "Nasdaq",
+        "^DJI":    "Dow",
+        "NVDA":    "NVDA",
+        "TSLA":    "TSLA",
+        "AAPL":    "AAPL",
+        "BTC-USD": "BTC",
+        "ETH-USD": "ETH",
+    }
+    lines = []
+    for symbol, label in tickers.items():
+        _, price, change = fetch_ticker(symbol)
+        if price is not None:
+            emoji = "\U0001f7e2" if change > 0 else "\U0001f534"
+            sign = "+" if change > 0 else ""
+            lines.append("- " + label + ": " + "{:.2f}".format(price) + " (" + sign + "{:.1f}".format(change) + "%) " + emoji)
+        else:
+            lines.append("- " + label + ": N/A")
+    return "\n".join(lines)
+
+
+def get_commodities_vol():
+    tickers = {
+        "GC=F": "Gold",
+        "CL=F": "Crude Oil",
+        "NG=F": "Nat Gas",
+        "^VIX": "VIX",
+    }
+    lines = []
+    for symbol, label in tickers.items():
+        _, price, change = fetch_ticker(symbol)
+        if price is not None:
+            emoji = "\U0001f7e2" if change > 0 else "\U0001f534"
+            sign = "+" if change > 0 else ""
+            lines.append("- " + label + ": " + "{:.2f}".format(price) + " (" + sign + "{:.1f}".format(change) + "%) " + emoji)
+        else:
+            lines.append("- " + label + ": N/A")
+    return "\n".join(lines)
+
+
+def get_fear_greed():
+    try:
+        d = requests.get("https://api.alternative.me/fng/", timeout=8).json()["data"][0]
+        return d["value_classification"] + " (" + d["value"] + ")"
+    except Exception as e:
+        log.warning("Fear & Greed failed: %s", e)
+        return "N/A"
+
+
+def get_economic_calendar():
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        url = (
+            "https://finnhub.io/api/v1/calendar/economic?from="
+            + today + "&to=" + today
+            + "&token=" + os.getenv("FINNHUB_KEY", "")
+        )
+        r = requests.get(url, timeout=8).json()
+        high = [e for e in r.get("economicCalendar", []) if e.get("impact") in ("high", "medium")]
+        if not high:
+            return "- Quiet day"
+        return "\n".join(
+            ["- " + e["time"] + " " + e["event"] + " (" + e.get("country", "") + ")" for e in high[:6]]
+        )
+    except Exception as e:
+        log.warning("Economic calendar failed: %s", e)
+        return "- Quiet day"
+
+
+def _fmt_usd(n):
+    if n >= 1_000_000:
+        return "${:.2f}m".format(n / 1_000_000)
+    if n >= 1_000:
+        return "${:.2f}k".format(n / 1_000)
+    return "${:.0f}".format(n)
+
+
+def get_hyperliquid_snapshot(hours=12):
+    """Aggregate liquidations over the last `hours` hours into a digest."""
+    cutoff = time.time() - hours * 3600
+    with liq_lock:
+        recent = [l for l in liq_cache if l.get("ts", 0) >= cutoff]
+
+    if not recent:
+        return "Quiet -- no significant liquidations in last {}h".format(hours)
+
+    # Aggregate per coin: total long liq USD, total short liq USD, counts
+    from collections import defaultdict
+    agg = defaultdict(lambda: {"long_usd": 0.0, "short_usd": 0.0, "long_n": 0, "short_n": 0, "total_usd": 0.0})
+    total_liq_usd = 0.0
+
+    for l in recent:
+        coin = l.get("coin", "?")
+        sz = float(l.get("sz", 0))
+        px = float(l.get("px", 0))
+        ntl = sz * px
+        is_long = "Long" in l.get("dir", "")
+        if is_long:
+            agg[coin]["long_usd"] += ntl
+            agg[coin]["long_n"] += 1
+        else:
+            agg[coin]["short_usd"] += ntl
+            agg[coin]["short_n"] += 1
+        agg[coin]["total_usd"] += ntl
+        total_liq_usd += ntl
+
+    # Sort by total USD liquidated
+    sorted_coins = sorted(agg.items(), key=lambda x: x[1]["total_usd"], reverse=True)
+
+    lines = []
+    lines.append("*{}h Liquidation Summary* — Total: {}".format(hours, _fmt_usd(total_liq_usd)))
+    lines.append("")
+
+    for coin, data in sorted_coins[:8]:
+        long_part = ""
+        short_part = ""
+        if data["long_usd"] > 0:
+            long_part = "\U0001f534 Longs: {} ({})".format(_fmt_usd(data["long_usd"]), data["long_n"])
+        if data["short_usd"] > 0:
+            short_part = "\U0001f7e2 Shorts: {} ({})".format(_fmt_usd(data["short_usd"]), data["short_n"])
+        both = "  |  ".join(filter(None, [long_part, short_part]))
+        lines.append("*#{}* — {}".format(coin, both))
+
+    total_count = sum(d["long_n"] + d["short_n"] for _, d in agg.items())
+    lines.append("")
+    lines.append("_{} total liquidation events across {} coins_".format(total_count, len(agg)))
 
     return "\n".join(lines)
 
 
-def ai_top5_weekly_stories(headlines: list[dict]) -> list[dict]:
-    """Ask Groq to pick 5 most significant, topic-diverse stories from the week's headlines."""
-    if not headlines:
-        return []
-    numbered = "\n".join(f"{i+1}. {h['title']}" for i, h in enumerate(headlines))
-    prompt = (
-        "You are a senior iGaming industry analyst. "
-        "From the list of headlines below, pick the 5 most significant stories "
-        "for a B2B iGaming audience — think regulation, major deals, market moves, or platform shifts. "
-        "IMPORTANT: Do not pick two stories covering the same topic or event — diversity of topics matters. "
-        "Reply ONLY with five numbers on separate lines (e.g. 3) — no explanation, no text.\n\n"
-        f"{numbered}"
-    )
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=30,
-            temperature=0.3,
+# Groq summarizer
+# Groq only ever receives deduplicated RSS headline text.
+# All structured data is assembled in Python and appended AFTER this returns.
+
+def summarize(raw_data, mode="all"):
+    if mode == "geo":
+        prompt = (
+            "You are an intelligence analyst. Summarize the following geopolitical and conflict "
+            "news headlines into concise, sharp bullets.\n\n"
+            "Rules:\n"
+            "- One distinct topic per bullet\n"
+            "- 1-2 sentences max per bullet\n"
+            "- Format links as [link](url) -- never show raw URLs\n"
+            "- No market data, no tech news, no newsletter content\n"
+            "- Group by region where possible (Europe, Middle East, Asia, Americas)\n\n"
+            "Raw headlines:\n" + raw_data[:6000]
         )
-        raw = response.choices[0].message.content.strip()
-        indices = []
-        for line in raw.split("\n"):
-            try:
-                idx = int(line.strip()) - 1
-                if 0 <= idx < len(headlines):
-                    indices.append(idx)
-            except ValueError:
-                continue
-        return [headlines[i] for i in indices[:5]]
-    except Exception as e:
-        log.error(f"Groq top5 error: {e}")
-        return headlines[:5]
+        max_tokens = 1000
 
+    elif mode == "market":
+        prompt = (
+            "You are a macro analyst. Summarize the following market and macro news headlines "
+            "into concise bullets.\n\n"
+            "Rules:\n"
+            "- One distinct topic per bullet\n"
+            "- 1-2 sentences max per bullet\n"
+            "- Format links as [link](url) -- never show raw URLs\n"
+            "- Focus strictly on: rates, central banks, equities, crypto, commodities, economic data\n"
+            "- No geopolitics unless directly market-moving, no tech product news, no newsletter content\n\n"
+            "Raw headlines:\n" + raw_data[:6000]
+        )
+        max_tokens = 1000
 
-def build_weekly_message(data: dict | None, dist_data: dict | None = None, trending: list | None = None) -> tuple[str, io.BytesIO | None]:
-    """Build the Monday weekly recap message + chart image."""
-    week_end   = datetime.now(timezone.utc).strftime("%d %b %Y")
-    week_start = (datetime.now(timezone.utc) - timedelta(days=6)).strftime("%d %b")
+    elif mode == "tech":
+        prompt = (
+            "You are an AI and tech analyst. Summarize the following AI and tech news headlines "
+            "into concise bullets.\n\n"
+            "Rules:\n"
+            "- One distinct topic per bullet\n"
+            "- 1-2 sentences max per bullet\n"
+            "- Format links as [link](url) -- never show raw URLs\n"
+            "- Focus strictly on: AI models, research, startups, big tech, developer tools, crypto tech\n"
+            "- PRIORITY: Any article from a16zcrypto.com must be included -- it is a high-signal source\n"
+            "- No market data, no geopolitics, no newsletter content\n\n"
+            "Raw headlines:\n" + raw_data[:6000]
+        )
+        max_tokens = 1000
 
-    lines = [
-        f"☕ <b>Happy Monday, The Cashout community!</b>\n"
-        f"Grab your coffee — here's your weekly onchain recap.\n"
-        f"<i>{week_start} – {week_end}</i>\n"
-    ]
-
-    chart_buf = None
-
-    if data:
-        weekly_vols = parse_weekly_volumes(data)
-        chart_buf   = generate_weekly_chart(weekly_vols)
-
-        if weekly_vols:
-            sorted_vols = sorted(weekly_vols.items(), key=lambda x: x[1], reverse=True)[:10]
-            medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-            lines.append("📊 <b>Top 10 Onchain Casinos — 7-Day Volume</b>")
-            for i, (name, vol) in enumerate(sorted_vols):
-                lines.append(f"{medals[i]} {name} — {format_volume(vol)}")
-        else:
-            lines.append("<i>Volume data unavailable this week.</i>")
     else:
-        lines.append("<i>Could not reach Tanzanite Terminal API.</i>")
+        prompt = (
+            "You are a sharp intelligence and market analyst. Summarize the headlines below "
+            "into three clearly separated sections.\n\n"
+            "Rules:\n"
+            "- Only use the RSS headlines provided -- do NOT reference newsletter content\n"
+            "- One distinct topic per bullet, 1-2 sentences max\n"
+            "- Format ALL links as [link](url) -- never show raw URLs in your output\n"
+            "- Strictly separate the three sections -- do not mix topics across them\n"
+            "- Group geopolitics by region where possible (Europe, Middle East, Asia, Americas)\n"
+            "- Do NOT add sections for newsletters, indicators, commodities, liquidations, or sentiment\n\n"
+            "Output EXACTLY this structure and nothing else:\n\n"
+            "Geopolitics & Conflicts\n"
+            "- bullet [link](url)\n\n"
+            "Markets & Macro\n"
+            "- bullet [link](url)\n\n"
+            "AI & Tech\n"
+            "- bullet [link](url)\n\n"
+            "Raw headlines:\n" + raw_data[:9000]
+        )
+        max_tokens = 2000
 
-    # Week-on-week movers from dedicated trending endpoint
-    if trending:
-        gainers = [e for e in trending if (e.get("usd_change_pct") or 0) > 0][:3]
-        losers  = [e for e in reversed(trending) if (e.get("usd_change_pct") or 0) < 0][:3]
-        if gainers or losers:
-            lines.append("\n📈 <b>Week-on-Week Movers</b>")
-        if gainers:
-            lines.append("Winners:")
-            for e in gainers:
-                lines.append(f"  ↑ {e['label']} +{e['usd_change_pct']:.1f}%")
-        if losers:
-            lines.append("Losers:")
-            for e in losers:
-                lines.append(f"  ↓ {e['label']} {e['usd_change_pct']:.1f}%")
+    for attempt in range(3):
+        try:
+            chat = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            return chat.choices[0].message.content.strip()
+        except Exception as e:
+            log.warning("Groq attempt %d failed: %s", attempt + 1, e)
+            time.sleep(3 * (attempt + 1))
 
-    # Player profile — retail vs whale breakdown from distribution endpoint
-    if dist_data:
-        profile = parse_player_profile(dist_data)
-        if profile:
-            lines.append("\n🎯 <b>Player Profile This Week</b>")
-            lines.append(
-                f"🐋 <b>Whale casino:</b> {profile['whale']} "
-                f"— {profile['whale_pct']:.0f}% of volume from $100K+ deposits"
-            )
-            lines.append(
-                f"🛒 <b>Most retail:</b> {profile['retail']} "
-                f"— {profile['retail_pct']:.0f}% of volume from &lt;$1K deposits"
-            )
-            lines.append(
-                f"📊 <b>Most balanced:</b> {profile['balanced']} "
-                f"— most evenly spread across deposit sizes"
-            )
+    log.error("Groq failed after 3 attempts, returning raw headlines")
+    return raw_data[:3500]
 
-    # Top 5 stories of last week via Groq
-    headlines = fetch_news_headlines(max_per_feed=5, total_max=25)
-    top5 = ai_top5_weekly_stories(headlines)
-    if top5:
-        lines.append("\n📰 <b>Top 5 Stories Last Week</b>")
-        for h in top5:
-            lines.append(
-                f'• {h["title"]}\n'
-                f'  <a href="{h["link"]}">Read more →</a>'
-            )
 
-    lines.append(
-        "\n<i>Onchain data: <a href=\"https://terminal.tanzanite.xyz\">Tanzanite Terminal</a> "
-        "| 💬 Drop a take in the comments</i>"
+# Brief builder
+
+def build_and_send_brief(chat_id):
+    log.info("Building morning brief for %s", chat_id)
+
+    # Step 1: fetch and deduplicate RSS headlines for Groq
+    osint     = get_osint_news()
+    mkt_news  = get_market_news()
+    tech_news = get_tech_news()
+
+    news_raw = (
+        "GEOPOLITICS HEADLINES:\n" + osint
+        + "\n\nMARKET/MACRO HEADLINES:\n" + mkt_news
+        + "\n\nAI/TECH HEADLINES:\n" + tech_news
     )
 
-    return "\n".join(lines), chart_buf
+    # Step 2: structured data fetched in Python, never touches Groq
+    indicators  = get_market_update()
+    commodities = get_commodities_vol()
+    hyper       = get_hyperliquid_snapshot()
+    econ        = get_economic_calendar()
+    fg          = get_fear_greed()
+    newsletters = get_newsletters_raw()
 
+    # Step 3: Groq summarizes only the three news sections
+    news_summary = summarize(news_raw, mode="all")
 
-def send_event_welcome(event: dict):
-    """
-    Post a welcome/networking message to an event channel.
-    Call this manually or hook it to a scheduled date.
-    """
-    message = (
-        f"👋 <b>Welcome to The Cashout — {event['name']}</b>\n\n"
-        f"📅 <b>Date:</b> {event['date']}\n"
-        f"📍 <b>Location:</b> {event['location']}\n\n"
-        f"This channel is your networking hub for {event['name']}. "
-        f"Drop your name, company, and what you're looking to connect on — "
-        f"let's make the most of the week.\n\n"
-        f"The Cashout daily onchain data + news brief runs in the main channel. "
-        f"This room is for people, meetings, and side events.\n\n"
-        f"{event['hashtag']} | 💬 Introduce yourself below"
+    # Step 4: assemble -- structured blocks appended directly by bot
+    date_str = datetime.now().strftime("%B %d, %Y %H:%M UTC")
+    full_message = (
+        "*Morning Brief -- " + date_str + "*\n\n"
+        + news_summary + "\n\n"
+        + "\U0001f4ca *Key Indicators*\n" + indicators + "\n\n"
+        + "\U0001f6e2 *Commodities & Vol*\n" + commodities + "\n\n"
+        + "\U0001f4a5 *Hyperliquid Liquidations*\n" + hyper + "\n\n"
+        + "\U0001f4c5 *Economic Calendar*\n" + econ + "\n\n"
+        + "\U0001f628 *Sentiment:* " + fg + "\n\n"
+        + "\U0001f4f0 *New Newsletters*\n" + newsletters
     )
-    try:
-        bot.send_message(event["id"], message, parse_mode="HTML")
-        log.info(f"Event welcome posted to {event['name']} ({event['id']})")
-    except Exception as e:
-        log.error(f"Failed to post event welcome to {event['id']}: {e}")
+
+    tg_send(chat_id, full_message)
+    save_last_brief_time()
 
 
-def send_event_countdown(event: dict, days_remaining: int):
-    """Post a countdown message to an event channel."""
-    message = (
-        f"⏳ <b>{days_remaining} days to {event['name']}</b>\n\n"
-        f"📅 {event['date']} · 📍 {event['location']}\n\n"
-        f"Who's going? Drop a reply — company, role, and what you want to "
-        f"talk about. The more people connect before the floor opens, the better.\n\n"
-        f"{event['hashtag']}"
+def send_scheduled_brief():
+    build_and_send_brief(CHANNEL_ID)
+
+
+# Commands
+
+@bot.message_handler(commands=["help"])
+def cmd_help(message):
+    text = (
+        "\U0001f4cb *Commands*\n\n"
+        "/all -- full morning brief\n"
+        "/geo -- geopolitics & conflicts\n"
+        "/market -- markets, macro, tickers & sentiment\n"
+        "/tech -- AI & tech news\n"
+        "/liqs -- Hyperliquid liquidation snapshot\n"
+        "/help -- show this menu\n"
     )
-    try:
-        bot.send_message(event["id"], message, parse_mode="HTML")
-        log.info(f"Countdown posted to {event['name']} — {days_remaining} days")
-    except Exception as e:
-        log.error(f"Failed to post countdown to {event['id']}: {e}")
+    tg_send(message.chat.id, text)
 
 
-# ── Senders ───────────────────────────────────────────────────────────────────
-
-def send_daily_brief():
-    log.info("Building daily brief…")
-    try:
-        data    = fetch_tanzanite()
-        message = build_daily_message(data)
-        bot.send_message(
-            CHANNEL_ID,
-            message,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        log.info("Daily brief posted successfully.")
-    except Exception as e:
-        log.error(f"Failed to post daily brief: {e}")
+@bot.message_handler(commands=["all", "brief", "full"])
+def cmd_all(message):
+    log.info("Received /all from chat_id=%s", message.chat.id)
+    tg_send(message.chat.id, "Building your morning brief...")
+    build_and_send_brief(message.chat.id)
 
 
-def send_weekly_recap():
-    log.info("Building weekly recap…")
-    try:
-        data      = fetch_tanzanite()
-        dist_data = fetch_tanzanite_distribution()
-        trending  = fetch_tanzanite_trending()   # week-on-week, used for weekly recap
-        message, chart = build_weekly_message(data, dist_data, trending)
-
-        if chart:
-            # Send chart as photo with minimal caption, then full message as follow-up text
-            # Telegram caption limit is 1024 chars — the full weekly message exceeds this
-            bot.send_photo(
-                CHANNEL_ID,
-                photo=chart,
-                caption="📊 <b>Weekly Onchain Deposit Rankings</b>",
-                parse_mode="HTML",
-            )
-            bot.send_message(
-                CHANNEL_ID,
-                message,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        else:
-            bot.send_message(
-                CHANNEL_ID,
-                message,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        log.info("Weekly recap posted successfully.")
-    except Exception as e:
-        log.error(f"Failed to post weekly recap: {e}")
+@bot.message_handler(commands=["geo", "geopolitics"])
+def cmd_geo(message):
+    log.info("Received /geo from chat_id=%s", message.chat.id)
+    tg_send(message.chat.id, "Fetching geopolitics...")
+    data = get_osint_news()
+    summary = summarize(data, mode="geo")
+    tg_send(
+        message.chat.id,
+        "\U0001f30d *Geopolitics & Conflicts -- " + datetime.now().strftime("%H:%M UTC") + "*\n\n" + summary
+    )
 
 
-INTRO_PROMPTS = [
-    "Who's in the community this week? 👋\n\nDrop your intro below — <b>name, company, role, and one thing you're working on or looking for</b>. The best connections start here.\n\n<i>Operators, affiliates, platform providers, investors, builders — all welcome.</i>",
-    "It's Introduction Friday. 🤝\n\nTell us who you are — <b>name, what you do, and who you'd like to connect with</b>. Keep it short, keep it real.\n\n<i>This thread has connected people across Malta, London, Gibraltar, Amsterdam and beyond. You're next.</i>",
-    "Friday means new connections. 🌍\n\nDrop a quick intro — <b>name, company, and what brought you to The Cashout</b>. Someone in this community has exactly what you're looking for.\n\n<i>iGaming is a small world. Make it smaller.</i>",
-    "The weekly networking thread is open. 💼\n\nIntroduce yourself — <b>who you are, what you build or operate, and what you're curious about right now</b>.\n\n<i>Operators, affiliates, sportsbook tech, crypto gambling, data — all corners of the industry represented here.</i>",
-    "TGIF — time to meet someone new. ☕\n\nDrop your intro — <b>name, role, and one question you'd love to discuss with someone in this community</b>.\n\n<i>The Cashout community spans 20+ countries. Your next deal might be one comment away.</i>",
-]
+@bot.message_handler(commands=["market"])
+def cmd_market(message):
+    log.info("Received /market from chat_id=%s", message.chat.id)
+    tg_send(message.chat.id, "Fetching markets...")
+    news        = get_market_news()
+    summary     = summarize(news, mode="market")
+    indicators  = get_market_update()
+    commodities = get_commodities_vol()
+    fg          = get_fear_greed()
+    full = (
+        "\U0001f4c8 *Markets & Macro -- " + datetime.now().strftime("%H:%M UTC") + "*\n\n"
+        + summary + "\n\n"
+        + "\U0001f4ca *Key Indicators*\n" + indicators + "\n\n"
+        + "\U0001f6e2 *Commodities & Vol*\n" + commodities + "\n\n"
+        + "\U0001f628 *Sentiment:* " + fg
+    )
+    tg_send(message.chat.id, full)
 
 
-def send_intro_friday():
-    """Post the weekly Introduction Friday prompt."""
-    log.info("Posting Introduction Friday…")
-    try:
-        day_index = datetime.now(timezone.utc).timetuple().tm_yday
-        prompt    = INTRO_PROMPTS[day_index % len(INTRO_PROMPTS)]
-
-        message = (
-            f"👥 <b>Introduction Friday</b>\n\n"
-            f"{prompt}\n\n"
-            f"<i>New here? Start with your intro. Regulars — tag someone worth knowing. 👇</i>"
-        )
-        bot.send_message(
-            CHANNEL_ID,
-            message,
-            parse_mode="HTML",
-        )
-        log.info("Introduction Friday posted successfully.")
-    except Exception as e:
-        log.error(f"Failed to post Introduction Friday: {e}")
-
-def main():
-    log.info("Starting The Cashout bot…")
-
-    # Load casino display labels from Tanzanite API (non-fatal if unavailable)
-    fetch_casino_labels()
-
-    # ── Test lines — uncomment ONE to test on deploy, then re-comment ──────────
-    # send_weekly_recap()   # ← weekly recap test
-    # send_daily_brief()    # ← daily brief test
-    # send_intro_friday()   # ← intro friday test
-
-    scheduler = BlockingScheduler(timezone="UTC")
-
-    # Daily brief — Tue–Fri at 08:00 UTC (= 9am CET until Mar 30, then change to 07:00 UTC for CEST)
-    scheduler.add_job(send_daily_brief, "cron", day_of_week="tue-fri", hour=8, minute=0)
-
-    # Weekly recap — Monday at 08:00 UTC
-    scheduler.add_job(send_weekly_recap, "cron", day_of_week="mon", hour=8, minute=0)
-
-    # Introduction Friday — 30 mins after daily brief so it lands as a second post
-    scheduler.add_job(send_intro_friday, "cron", day_of_week="fri", hour=8, minute=30)
-
-    log.info("Scheduler running — Mon: weekly recap | Tue–Fri: daily brief 08:00 UTC | Fri 08:30 UTC: intro post | weekends off.")
-
-    try:
-        scheduler.start()
-    except (KeyboardInterrupt, SystemExit):
-        log.info("Bot stopped.")
+@bot.message_handler(commands=["tech"])
+def cmd_tech(message):
+    log.info("Received /tech from chat_id=%s", message.chat.id)
+    tg_send(message.chat.id, "Fetching AI & tech...")
+    data    = get_tech_news()
+    summary = summarize(data, mode="tech")
+    tg_send(
+        message.chat.id,
+        "\U0001f916 *AI & Tech -- " + datetime.now().strftime("%H:%M UTC") + "*\n\n" + summary
+    )
 
 
-if __name__ == "__main__":
-    main()
+@bot.message_handler(commands=["liqs"])
+def cmd_liqs(message):
+    log.info("Received /liqs from chat_id=%s", message.chat.id)
+    snapshot = get_hyperliquid_snapshot()
+    tg_send(
+        message.chat.id,
+        "\U0001f4a5 *Hyperliquid Snapshot -- " + datetime.now().strftime("%H:%M UTC") + "*\n\n" + snapshot
+    )
+
+
+# Scheduler
+
+scheduler = BackgroundScheduler(timezone="Europe/Rome")
+scheduler.add_job(send_scheduled_brief, "cron", hour=6, minute=0)
+scheduler.add_job(send_scheduled_brief, "cron", hour=19, minute=0)
+scheduler.add_job(_check_push_accounts, "interval", minutes=10)
+scheduler.start()
+
+# Seed push-seen IDs on startup (so we don't flood on first boot)
+_check_push_accounts()
+
+log.info("Coffee Brief bot STARTED")
+bot.infinity_polling()
