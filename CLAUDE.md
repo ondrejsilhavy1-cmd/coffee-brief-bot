@@ -133,3 +133,6 @@ Found by reading the code.
 - **Startup code runs at import time** (threads, scheduler, polling), so the module cannot be imported for tests.
 - **Leftovers and missing files:** the `websocket` import is unused, versions are not pinned, and there is no `.gitignore` or `.env.example`.
 - **There is no Railway config in the repo,** so the start command and replica count exist only in the Railway dashboard.
+
+## Secrets and env
+- Config comes from environment variables (see `.env.example`). Real values go in a local `.env`, which `.gitignore` excludes, or in Railway variables. Never commit `.env`.
